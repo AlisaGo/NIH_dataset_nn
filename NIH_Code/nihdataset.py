@@ -56,7 +56,8 @@ import cv2
 class NIHChestXRayDataset(Dataset):
     def __init__(self, main_dir,
                  max_size=5000, top_x=6,
-                 transform=None, cache_dir=None,
+                 transform=None,
+                 cache_dir=None,
                  use_cache=False):
 
         self.main_dir = main_dir
@@ -120,11 +121,10 @@ class NIHChestXRayDataset(Dataset):
         Load the official NIH CSV and match each row to an actual image path.
         """
         main_dir = self.main_dir
-        all_xray_df = pd.read_csv(os.path.join(main_dir, "../Information/Data_Entry_2017.csv"))
+        all_xray_df = pd.read_csv(os.path.join(main_dir, 'Information', 'Data_Entry_2017.csv'))
         if self.use_cache == False:
             patterns = [
-                os.path.join(main_dir, 'images_*/images', '*.png'),
-                # os.path.join(main_dir, 'images_002/images', '*.png'),
+                os.path.join(main_dir, 'Data', 'archive', 'images_*/images', '*.png'),
             ]
         elif self.use_cache == True:
             patterns = [

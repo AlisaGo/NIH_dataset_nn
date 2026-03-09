@@ -37,22 +37,19 @@ import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # parent of NIH_Code
-main_dir = BASE_DIR / "Data" / "archive"
-# cache_dir = os.path.join(main_dir, "cache_224_tot_90_jpg")
+data_dir = BASE_DIR/ "Data" / "archive"
 cache_dir = BASE_DIR /"Cached_Data" / "cache_224_tot_90_jpg"
 NIH_LABELS_CSV = BASE_DIR /"Information"/ "Data_Entry_2017.csv"
-# NIH_IMAGES_DIR_1 = os.path.join(main_dir, "images_001", "images")
-# NIH_LABELS_CSV = os.path.join(main_dir, "Information", "Data_Entry_2017.csv")
 
 # -- SUBSET SETTINGS --
-MAX_IMAGES = 2000  # Number of images to use (subset) to keep runtime manageable, this code
+MAX_IMAGES = 50000  # Number of images to use (subset) to keep runtime manageable, this code
 # chooses a representative subset, which is roughly of this size and aims to keep the proportions
 # of different pathologies in the representative subset similar to the original distribution
 # favoring thereby pathologies over negatives
 NUM_LABELS = 14  # Use only this number of labels, choosing the most frequent in descending order
 
 # -- EPOCHS SETTINGS --
-NUM_EPOCHS = 3
+NUM_EPOCHS = 5
 BATCH_SIZE = 32
 NUM_WORKERS = 2
 
@@ -131,12 +128,12 @@ if __name__ == "__main__":
         transforms.ToTensor(),
         transforms.Normalize(mean=mean, std=std)
     ])
-
-    nih_data = NIHChestXRayDataset(main_dir=main_dir, max_size=MAX_IMAGES,
+    nih_data = NIHChestXRayDataset(main_dir=BASE_DIR, max_size=MAX_IMAGES,
                                    top_x=NUM_LABELS, transform=transform,
                                    cache_dir=cache_dir, use_cache=True)
 
     print("NIH Dataset created")
+    print(os.path.join(BASE_DIR, "/Information/Data_Entry_2017.csv"))
     top_labels = nih_data.top_labels
     num_diseases = len(top_labels)
 
