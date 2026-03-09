@@ -1,0 +1,19 @@
+# virtual environment
+alis_venv/
+
+# project data
+Data/
+Evaluation/
+
+# python cache
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+
+# OS files
+.DS_Store
+
+# temporary file
+test.py
