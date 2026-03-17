@@ -5,7 +5,7 @@ Compute and aggregate binary classification performance metrics.
 
 Functions:
   compute_fn_rate:
-    Given model predictions and ground-truth labels (both binary tensors),
+    Given model predictions and ground-truth train_labels (both binary tensors),
     compute the false-negative rate for each label.
 
   give_performance_metrics:
@@ -23,6 +23,9 @@ Functions:
 
 import torch
 import pandas as pd
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
 
 def compute_tp_fp_tn_fn(predictions, labels):
 
@@ -110,7 +113,7 @@ def give_performance_metrics(tp, tn, fp, fn):
     return accuracy, precision, recall, f1_score
 
 
-def give_eval_stats(epoch, top_labels, predictions, labels):
+def give_eval_stats(epoch, top_labels, predictions, labels, probs=None):
     """
     Build a pandas DataFrame of per-label stats for logging or analysis.
 
@@ -118,7 +121,9 @@ def give_eval_stats(epoch, top_labels, predictions, labels):
       epoch        (int):     training epoch number
       top_labels (List[str]): ordered list of label names; index 0 must be the 'negative' / 'no-finding' label
       predictions  (Tensor):  shape (N, K), raw binary predictions (0/1)
-      labels       (Tensor):  shape (N, K), ground-truth binary labels (0/1)
+      labels       (Tensor):  shape (N, K), ground-truth binary train_labels (0/1)
+      probs       (Tensor):  shape (N, K), probabilities in [0,1].
+      If provided, AUROC is computed per label when possible.
 
     Returns:
       eval_stats (pd.DataFrame) with columns:
@@ -126,9 +131,10 @@ def give_eval_stats(epoch, top_labels, predictions, labels):
         - label
         - [for j=0 only] tp->tn, fp->fn
     """
-    # 1) get raw counts for all K labels at once
+    # 1) get raw counts for all K train_labels at once
     tp_all, fp_all, tn_all, fn_all = compute_tp_fp_tn_fn(predictions, labels)
 
+    records = []
     # neg_idx = list(top_labels).index("Negative")
     records = []
     for j, label in enumerate(top_labels):
@@ -139,7 +145,12 @@ def give_eval_stats(epoch, top_labels, predictions, labels):
         total_pos = tp_j + fn_j
         # compute accuracy, precision, recall, f1
         acc_j, prec_j, rec_j, f1_j = give_performance_metrics(tp_j, tn_j, fp_j, fn_j)
-
+        auc_j = np.nan
+        if probs is not None:
+            y_true = labels[:, j].cpu().numpy().astype(int)
+            y_score = probs[:, j].cpu().numpy()
+            if np.unique(y_true).size == 2:
+                auc_j = roc_auc_score(y_true, y_score)
         # if j == neg_idx:
         #     # We say for the negative class that negative means 'Negative' = 1,
         #     # thus we invert the notation p and n for this class. This hasn't any
@@ -151,28 +162,32 @@ def give_eval_stats(epoch, top_labels, predictions, labels):
         #     fn_j = fp_j
         #     fp_j = fp_j_help
         records.append({
-            'epoch': epoch + 1,
-            'label': label,
-            'total_pos': total_pos,
-            'tp': tp_j,
-            'fp': fp_j,
-            'tn': tn_j,
-            'fn': fn_j,
-            'accuracy': round(acc_j,3),
-            'precision': round(prec_j,3),
-            'recall': round(rec_j,3),
-            'f1_score': round(f1_j,3)
+            "epoch": epoch + 1,
+            "label": label,
+            "total_pos": total_pos,
+            "tp": tp_j,
+            "fp": fp_j,
+            "tn": tn_j,
+            "fn": fn_j,
+            "accuracy": round(acc_j, 3),
+            "precision": round(prec_j, 3),
+            "recall": round(rec_j, 3),
+            "f1_score": round(f1_j, 3),
+            "auroc": round(float(auc_j), 3) if not np.isnan(auc_j) else np.nan,
         })
 
-    # 2) pack into a DataFrame for easy plotting/saving
-    eval_stats = pd.DataFrame.from_records(records,
-                                           columns=[
-                                               'epoch', 'label', 'total_pos',
-                                               'tn', 'fn',
-                                               'tp', 'fp', 'accuracy', 'precision', 'recall',
-                                               'f1_score'
-                                           ])
+        eval_stats = pd.DataFrame.from_records(
+            records,
+            columns=[
+                "epoch", "label", "total_pos",
+                "tp", "fp", "tn", "fn",
+                "accuracy", "precision", "recall",
+                "f1_score", "auroc"
+            ]
+        )
+
     return eval_stats
+
 
 
 

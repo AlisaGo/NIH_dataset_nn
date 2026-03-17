@@ -4,6 +4,8 @@ alis_venv/
 # project data
 Data/
 Evaluation/
+Evaluation_v1
+README_NIH_dataset_nn.md
 
 # python cache
 __pycache__/
@@ -17,3 +19,5 @@ __pycache__/
 
 # temporary file
 test.py
+
+.tmp.driveupload/

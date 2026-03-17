@@ -2,17 +2,57 @@
 """
 Multi-label NN Optimization on NIH Chest X-Ray Dataset
 
+NIH Chest X-Ray Dataset:
+Original resolution: 1024x1024
+Scans: 112120
+Number of patients: 30805
+Mean images per patient: 3.64
+Diseases by frequency
+Negative              60361
+Infiltration          19894
+Effusion              13317
+Atelectasis           11559
+Nodule                 6331
+Mass                   5782
+Pneumothorax           5302
+Consolidation          4667
+Pleural_Thickening     3385
+Cardiomegaly           2776
+Emphysema              2516
+Edema                  2303
+Fibrosis               1686
+Pneumonia              1431
+Hernia                  227
+dtype: int64
+Patients by number of labels that change across their images
+0     21341
+1       181
+2      3221
+3      1892
+4      1293
+5       987
+6       620
+7       487
+8       324
+9       201
+10      136
+11       83
+12       28
+13        7
+14        4
 """
 
 # import
 import time
+from cmath import inf
+
 import numpy as np
 import torch
 import torch.nn as nn
 from models import (
     MultiLabelMobileNet, MultiLabelResNet
 )
-from nihdataset import NIHChestXRayDataset
+from nihdataset import NIHChestXRayDataset, XRayStandardize
 import torchvision.transforms as transforms
 from functions import (
     get_data_loaders,
@@ -22,7 +62,8 @@ from functions import (
     give_epoch_stats,
     plot_roc_curve,
     plot_images_classification,
-    find_best_thresholds_per_label
+    find_best_thresholds_per_label,
+    set_global_seed
 )
 
 from performance_metrics import compute_fn_fp_rate, compute_weighted_f1
@@ -37,38 +78,78 @@ import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent  # parent of NIH_Code
-data_dir = BASE_DIR/ "Data" / "archive"
-cache_dir = BASE_DIR /"Cached_Data" / "cache_224_tot_90_jpg"
-NIH_LABELS_CSV = BASE_DIR /"Information"/ "Data_Entry_2017.csv"
+data_dir = BASE_DIR / "Data" / "archive"
+cache_dir = BASE_DIR / "Cached_Data" / "cache_224_tot_90_jpg"
+NIH_LABELS_CSV = BASE_DIR / "Information" / "Data_Entry_2017.csv"
+
+# -- Random seed --
+SEED = 42
+set_global_seed(SEED)
+
+# -- Rescale images to speed up training --
+do_rescale = True
+
+# -- Used Cached Images with reduced size --
+use_cache = True
+if use_cache:
+    do_rescale = False  # Cached images are already rescaled
+
+# -- Used official train eval split --
+USE_OFFICIAL_SPLIT = True
+TRAIN_VAL_LIST = BASE_DIR / "Information" / "train_val_list.txt"
+TEST_LIST = BASE_DIR / "Information" / "test_list.txt"
+
+# # -- Exclude Labels --
+EXCLUDED_LABELS = {
+    "Nodule",  # Small-object difficulty, exclude due to resolution 1024 -> 320 or 224
+    "Mass",  # difficult to detect, due to large within-class appearance variation
+    "Hernia",  # Only 227 examples are too few!
+}
+
+# -- Partiel unfreeze bad labels --
+partial_unfreeze_bad_labels = True  # Decides if to unfreeze just the head or also the
+# last backbone block of the model for fine-tuning on less performant labels
 
 # -- SUBSET SETTINGS --
-MAX_IMAGES = 50000  # Number of images to use (subset) to keep runtime manageable, this code
+MAX_IMAGES = 2000  # Number of images to use (subset) to keep runtime manageable, this code
 # chooses a representative subset, which is roughly of this size and aims to keep the proportions
 # of different pathologies in the representative subset similar to the original distribution
 # favoring thereby pathologies over negatives
-NUM_LABELS = 14  # Use only this number of labels, choosing the most frequent in descending order
+eval_frac = 0.15  # Wrt. max_images
+NUM_LABELS_ALL = 14
+NUM_LABELS = 11  # Use only this number of abels, choosing the most frequent in descending
+# order
+
+NUM_LABELS = min(NUM_LABELS_ALL - len(EXCLUDED_LABELS), NUM_LABELS)
+
+# Prob thresholds for prediction
+THRESHOLD_TUNE_EPOCH = 1
+initial_prob_threshold = 0.25
+prob_thresholds = np.ones(NUM_LABELS) * initial_prob_threshold
+thresholds_by_disease = True  # Optimize threshold per disease to improve f1 score on tuning set
+derive_negatives = True  # The Negative label is assigned if no disease probability exceeds its threshold.
 
 # -- EPOCHS SETTINGS --
-NUM_EPOCHS = 5
+NUM_EPOCHS = 3
 BATCH_SIZE = 32
 NUM_WORKERS = 2
 
-initial_prob_threshold = 0.2
-prob_thresholds = np.ones(NUM_LABELS) * initial_prob_threshold
-thresholds_by_disease = True  # Optimize threshold per disease to improve f1 score on tuning set
-derive_negatives = True # The Negative label is assigned if no disease probability exceeds its threshold.
+# -- Stopping criteria  --
 f1_neg_threshold = 0.85
 f1_pos_threshold = 0.30
-
 delta_loss = 0.002
 
-pretrained_model = 'MultiLabelMobileNet'
-# pretrained_model = 'MultiLabelResNet'
+# -- Model --
+# pretrained_model = 'MultiLabelMobileNet'
+pretrained_model = 'MultiLabelResNet'
 train_full_model = True
 
-preset_pos_weights = True
+# -- Loss function weights --
+# Preset and update pos. weights of the loss function
+preset_pos_weights = False
+update_pos_weights = False
 
-# NIH dataset has 14 disease labels:
+# -- NIH dataset has 14 disease train_labels --
 DISEASE_LABELS = [
     "Atelectasis", "Cardiomegaly", "Effusion", "Infiltration",
     "Mass", "Nodule", "Pneumonia", "Pneumothorax",
@@ -85,7 +166,7 @@ if __name__ == "__main__":
         1) Instantiate multi-label classifier
         2) Load and split NIH Chest X-Ray data
         3) Train and validate each epoch in NUM_EPOCHS
-        4) Fine-tune labels with high FN rate
+        4) Fine-tune train_labels with high FN rate
         5) Compute and save per-disease statistics
         6) Plot and save ROC curves and sample predictions
     """
@@ -97,7 +178,16 @@ if __name__ == "__main__":
         else "cpu"
     )
 
+    if device.type == "cuda":
+        pin_memory = True
+        NUM_WORKERS = 4
+    else:
+        pin_memory = False
+
     print("Using device:", device)
+
+    use_amp = (device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     if device.type == "cuda":
         print("GPU:", torch.cuda.get_device_name(0))
@@ -111,56 +201,79 @@ if __name__ == "__main__":
         std = np.array([0.229, 0.224, 0.225])
     elif pretrained_model == 'MultiLabelResNet':
         my_model = MultiLabelResNet(NUM_LABELS)
-        mean=np.array([0.485, 0.456, 0.406])
-        std=np.array([0.229, 0.224, 0.225])
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
     else:
         raise ValueError(f"Unknown pretrained_model: {pretrained_model}")
 
+    print(f"pretrained model:", pretrained_model)
     my_model.to(device)
 
     #############################################
     # 2) DATA PREPARATION
     #############################################
+    if use_cache:
+        IMG_SIZE = 224
+    else:
+        IMG_SIZE = 1024
 
-    transform = transforms.Compose([
-        # transforms.Resize((224, 224)),
-        # transforms.RandomRotation(degrees=5),
+    train_transform = transforms.Compose([
+        XRayStandardize(do_rescale=do_rescale, size=IMG_SIZE, clip_percentiles=(1, 99)),
+        transforms.RandomAffine(
+            degrees=5,
+            translate=(0.02, 0.02),
+            scale=(0.98, 1.02)
+        ),
         transforms.ToTensor(),
         transforms.Normalize(mean=mean, std=std)
     ])
-    nih_data = NIHChestXRayDataset(main_dir=BASE_DIR, max_size=MAX_IMAGES,
-                                   top_x=NUM_LABELS, transform=transform,
-                                   cache_dir=cache_dir, use_cache=True)
+
+    eval_transform = transforms.Compose([
+        XRayStandardize(do_rescale=do_rescale, size=IMG_SIZE, clip_percentiles=(1, 99)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean, std=std)
+    ])
+
+    nih_data = NIHChestXRayDataset(main_dir=BASE_DIR, label_file=NIH_LABELS_CSV,
+                                   use_official_split=USE_OFFICIAL_SPLIT,
+                                   train_val_list_path=TRAIN_VAL_LIST, test_list_path=TEST_LIST,
+                                   max_size=MAX_IMAGES, eval_frac=eval_frac, top_x=NUM_LABELS,
+                                   train_transform=train_transform, eval_transform=eval_transform,
+                                   excluded_labels=EXCLUDED_LABELS, cache_dir=cache_dir,
+                                   random_seed=SEED, use_cache=use_cache)
 
     print("NIH Dataset created")
-    print(os.path.join(BASE_DIR, "/Information/Data_Entry_2017.csv"))
     top_labels = nih_data.top_labels
     num_diseases = len(top_labels)
 
-    print(f'Using top {num_diseases} disease labels, which are: {top_labels}.')
+    print(f'Using top {num_diseases} disease train_labels, which are: {top_labels}.')
 
-    train_loader, tune_loader, eval_loader = get_data_loaders(nih_data, BATCH_SIZE, NUM_WORKERS)
+    train_loader, tune_loader, test_loader = get_data_loaders(
+        BATCH_SIZE,
+        NUM_WORKERS,
+        nih_dataset=nih_data,
+        pin_memory=pin_memory,
+    )
+
     # t0 = time.time()
-    # images, labels = next(iter(train_loader))
+    # images, train_labels = next(iter(train_loader))
     # print("First batch load sec:", round(time.time() - t0, 2))
-    # print("Batch shapes:", images.shape, labels.shape)
+    # print("Batch shapes:", images.shape, train_labels.shape)
 
     print("Dataset length:", len(nih_data))
     print("Train loader size:", len(train_loader.dataset))
-    print("Val loader size:", len(eval_loader.dataset))
+    print("Test loader size:", len(test_loader.dataset))
     print("Tune loader size:", len(tune_loader.dataset))
 
     #############################################
     # 3) Setup Loss & Optimizer
     #############################################
-    train_indices = train_loader.dataset.indices
-
-    labels = nih_data.data_df.loc[train_indices, top_labels].values
+    train_labels = nih_data.data_df.iloc[nih_data.train_idx][top_labels].values
 
     print("Setting up nn optimizer.")
     if preset_pos_weights:
-        pos = labels.sum(axis=0)
-        N = labels.shape[0]
+        pos = train_labels.sum(axis=0)
+        N = train_labels.shape[0]
         pos = np.clip(pos, 1, None)
         pos_weight = (N - pos) / pos
         pos_weight = np.clip(pos_weight, 1.0, None)
@@ -180,7 +293,6 @@ if __name__ == "__main__":
         params = my_model.parameters()
 
     else:
-        requires_grad = False
         lr = 1e-3
         weight_decay = 0.0
         if pretrained_model == "MultiLabelMobileNet":
@@ -198,7 +310,8 @@ if __name__ == "__main__":
     #############################################
     # 4) Training and Evaluation
     #############################################
-    val_loss_min = 10
+    val_loss_min = float("inf")
+    early_stopping = False
 
     for epoch in range(NUM_EPOCHS):
         print('━' * 60)
@@ -206,10 +319,9 @@ if __name__ == "__main__":
         # ━━━━━━━━━━━━━━━━━━ Training ━━━━━━━━━━━━━━━━━
         print(f"{'━' * 15} Training {'━' * 15}")
         my_model, train_loss_avg = train_one_epoch(my_model, criterion, optimizer, train_loader,
-                                                   device)
+                                                   device, scaler, use_amp)
 
-
-        if epoch <= 3:
+        if epoch == THRESHOLD_TUNE_EPOCH:
 
             # Probability Threshold tuning
             # =========================
@@ -219,16 +331,12 @@ if __name__ == "__main__":
             if thresholds_by_disease:
                 thr_tensor = torch.as_tensor(prob_thresholds, device=device,
                                              dtype=torch.float32).view(1, -1)
-                all_predictions, all_probs, all_labels, val_loss_avg \
+                all_predictions, all_probs, all_labels, all_patient_ids, val_loss_avg \
                     = validate_one_epoch(my_model, tune_loader, device, criterion, thr_tensor,
-                                         derive_negatives)
+                                         use_amp)
 
-                prob_thresholds = find_best_thresholds_per_label(
-                    probs=all_probs,
-                    labels=all_labels,
-                    top_labels=top_labels,
-                    n_grid=40
-                )
+                prob_thresholds = find_best_thresholds_per_label(probs=all_probs, labels=all_labels,
+                                                                 n_grid=40)
 
                 for label, thr in zip(top_labels, prob_thresholds):
                     print(f"{label}: {thr:.3f}")
@@ -240,83 +348,89 @@ if __name__ == "__main__":
 
         thr_tensor = torch.as_tensor(prob_thresholds, device=device, dtype=torch.float32).view(1,
                                                                                                -1)
-        all_predictions, all_probs, all_labels, val_loss_avg \
-            = validate_one_epoch(my_model, eval_loader, device, criterion, thr_tensor,
+        # Each epoch validation is taking place on the tune_loader, as this
+        # validation result is used as early stopping criteria.
+        all_predictions, all_probs, all_labels, all_patient_ids, val_loss_avg \
+            = validate_one_epoch(my_model, tune_loader, device, criterion, thr_tensor, use_amp,
                                  derive_negatives)
-
-        dt = time.time() - t0
-        print(f"Test Validation sec:", round(dt, 2))
-        if epoch >= 1:
-            all_predictions_tune, _, all_labels_tune, _ \
-                = validate_one_epoch(my_model, tune_loader, device, criterion, thr_tensor,
-                                     derive_negatives)
-            [fn_rate, fp_rate] = compute_fn_fp_rate(all_predictions_tune, all_labels_tune)
-            pos_weight = abs(1.0 / (1.0 - 0.2 * fn_rate + 1e-6))
-            pos_weight = pos_weight.to(device)
-            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-            # if max(fp_rate) < 0.11 and (max(fn_rate) > 0.5 or np.mean(fn_rate) > 0.3):
-            #     pos_weight = 1.0 / (1.0 - 0.1 * fn_rate + 1e-6)
-            #     pos_weight = pos_weight.to(device)
-            #     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-            # else:
-            #     criterion = nn.BCEWithLogitsLoss()
-
-        if epoch == NUM_EPOCHS - 1:
-            # Finetuning
-            # Fine tune the last layer only for those labels,
-            # where fn / (fn + tp) = fn_rate >= 0.3,
-            # =========================
-            [fn_rate, fp_rate] = compute_fn_fp_rate(all_predictions, all_labels)
-
-            # bad_labels should just choose the id of the disease with too high fn_rates
-            bad_labels = np.where(fn_rate > 0.30)[0].tolist()
-            if bad_labels:
-                my_model = fine_tune_bad_labels(my_model, train_loader.dataset, bad_labels, device, n_epochs=2,
-                                                lr=1e-4)
-
-                all_predictions, all_probs, all_labels, val_loss_avg \
-                    = validate_one_epoch(my_model, eval_loader, device, criterion, thr_tensor,
-                                         derive_negatives)
-
-                [fn_rate, fp_rate] = compute_fn_fp_rate(all_predictions, all_labels)
-
-        # Statistics
-        # =========================
-        print(f"{'━' * 15} Statistics {'━' * 15}")
 
         stop_metric, f1_neg, f1_pos = compute_weighted_f1(predictions=all_predictions,
                                                           labels=all_labels,
                                                           top_labels=top_labels)
 
-        early_stopping = False
-        if f1_neg >= f1_neg_threshold and f1_pos > f1_pos_threshold:
-            early_stopping = True
+        [fn_rate, fp_rate] = compute_fn_fp_rate(all_predictions, all_labels)
 
-        if val_loss_avg > val_loss_min + delta_loss:
-            early_stopping = True
-        else:
-            val_loss_min = min(val_loss_avg, val_loss_min)
+        dt = time.time() - t0
+        print(f"Test Validation sec:", round(dt, 2))
 
-        val_accuracy, eval_stats = give_epoch_stats(f1_neg, f1_pos,
-                                                    NUM_EPOCHS,
-                                                    epoch,
-                                                    top_labels,
-                                                    all_predictions,
-                                                    all_labels,
-                                                    train_loss_avg,
-                                                    val_loss_avg,
-                                                    early_stopping)
 
-        if f1_neg >= f1_neg_threshold and f1_pos > f1_pos_threshold:
-            print(f"Early stop at epoch {epoch + 1} because we reached "
-                  f"threshold f1 neg {f1_neg} over {f1_neg_threshold} "
-                  f"and f1 pos {f1_pos} over {f1_pos_threshold}.")
-            break
+        if epoch >= 1 and update_pos_weights:
+            pos_weight = abs(1.0 / (1.0 - 0.2 * fn_rate + 1e-6))
+            pos_weight = pos_weight.to(device)
+            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        # if max(fp_rate) < 0.11 and (max(fn_rate) > 0.5 or np.mean(fn_rate) > 0.3):
+        #     pos_weight = 1.0 / (1.0 - 0.1 * fn_rate + 1e-6)
+        #     pos_weight = pos_weight.to(device)
+        #     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        # else:
+        #     criterion = nn.BCEWithLogitsLoss()
 
-        if val_loss_avg > val_loss_min + delta_loss:
-            print(f"Early stop at epoch {epoch + 1} because this epochs loss {val_loss_avg} "
-                  f"compared to the minimal loss in the previous epochs {val_loss_min}.")
-            break
+        if epoch < NUM_EPOCHS - 1:
+            if f1_neg >= f1_neg_threshold and f1_pos > f1_pos_threshold:
+                early_stopping = True
+                print(f"Early stop at epoch {epoch + 1} because we reached "
+                      f"threshold f1 neg {f1_neg} over {f1_neg_threshold} "
+                      f"and f1 pos {f1_pos} over {f1_pos_threshold}.")
+
+            if val_loss_avg > val_loss_min + delta_loss:
+                early_stopping = True
+                print(
+                    f"Early stop at epoch {epoch + 1} because this epochs loss {val_loss_avg} "
+                    f"compared to the minimal loss in the previous epochs {val_loss_min}.")
+            else:
+                val_loss_min = min(val_loss_avg, val_loss_min)
+
+            print(f"{'━' * 15} Statistics on Tune Set {'━' * 15}")
+            val_accuracy, eval_stats = give_epoch_stats(f1_neg, f1_pos, NUM_EPOCHS, epoch,
+                                                        top_labels, all_predictions, all_labels,
+                                                        train_loss_avg, val_loss_avg, all_probs,
+                                                        final_evaluation = False)
+
+            if early_stopping:
+                break
+
+    if early_stopping or epoch == NUM_EPOCHS - 1:
+
+        # Finetuning
+        # Fine tune the last layer only for those train_labels,
+        # where fn / (fn + tp) = fn_rate >= 0.3,
+        # bad_labels should just choose the id of the disease with too high fn_rates
+        bad_labels = np.where(fn_rate > 0.30)[0].tolist()
+        if bad_labels:
+            print(f"{'━' * 15} Fine Tuning {'━' * 15}")
+
+            my_model = fine_tune_bad_labels(my_model, train_loader.dataset, bad_labels, device,
+                                            partial_unfreeze_bad_labels, pin_memory, n_epochs=2,
+                                            lr=1e-4)
+
+        # Statistics
+        # =========================
+        print(f"{'━' * 15} Statistics on Test Set {'━' * 15}")
+        all_predictions, all_probs, all_labels, all_patient_ids, val_loss_avg \
+            = validate_one_epoch(my_model, test_loader, device, criterion, thr_tensor, use_amp,
+                                 derive_negatives)
+
+        [fn_rate, fp_rate] = compute_fn_fp_rate(all_predictions, all_labels)
+        _, f1_neg, f1_pos = compute_weighted_f1(predictions=all_predictions,
+                                                          labels=all_labels,
+                                                          top_labels=top_labels)
+
+        val_accuracy, eval_stats = give_epoch_stats(f1_neg, f1_pos, NUM_EPOCHS, epoch,
+                                                    top_labels, all_predictions, all_labels,
+                                                    train_loss_avg, val_loss_avg, all_probs,
+                                                    final_evaluation = True)
+
+
 
     end = time.perf_counter()
 
@@ -338,7 +452,7 @@ if __name__ == "__main__":
     plot_roc_curve(all_probs, all_labels, top_labels, eval_dir)
 
     print('Plotting image samples')
-    plot_images_classification(my_model, eval_loader, device, top_labels, thr_tensor, mean, std,
+    plot_images_classification(my_model, test_loader, device, top_labels, thr_tensor, mean, std,
                                eval_dir, derive_negatives)
     end1 = time.perf_counter()
     print(f"Elapsed for stats/pics: {end1 - start1:.1f} seconds")

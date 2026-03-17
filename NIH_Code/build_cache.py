@@ -1,6 +1,6 @@
 import os
 from glob import glob
-from PIL import Image
+from PIL import Image,ImageOps
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from tqdm import tqdm
@@ -18,7 +18,7 @@ def convert_one(src_path: str, dst_dir: str, size: int, quality: int):
         return
 
     img = Image.open(src_path).convert("RGB")
-    img = img.resize((size, size), resample=Image.BILINEAR)
+    img = ImageOps.pad(img, (size, size), method=Image.BILINEAR, color=(0, 0, 0))
     img.save(dst_path, "JPEG", quality=quality, optimize=True)
 
 
