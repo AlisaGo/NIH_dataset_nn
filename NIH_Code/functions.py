@@ -175,7 +175,9 @@ def validate_one_epoch(my_model, test_loader, device,
 def fine_tune_bad_labels(model, train_subset, bad_label_ids, device,
                          partial_unfreeze=True,
                          pin_memory=False,
-                         n_epochs=2, lr=1e-4):
+                         n_epochs=1,
+                         lr_bb=1e-5,
+                         lr_head=3e-5):
     """
     After an epoch, call this to fine-tune only on train_labels with
     false-negative rate > threshold_fn. Freezes most of the backbone,
@@ -211,27 +213,50 @@ def fine_tune_bad_labels(model, train_subset, bad_label_ids, device,
     for param in model.parameters():
         param.requires_grad = False
 
+    backbone = []
     if hasattr(model.model, 'fc'):
         if partial_unfreeze:
-            for param in model.model.layer4.parameters():
-                param.requires_grad = True
-        head_params = list(model.model.fc.parameters())
-
+            backbone_layer = model.model.layer4
+        head_layer = model.model.fc
 
     elif hasattr(model.model, 'classifier'):
         if partial_unfreeze:
-            for param in model.model.features[-2:].parameters():
-                param.requires_grad = True
-        head_params = list(model.model.classifier.parameters())
+            backbone_layer = model.model.features[-2:]
+        head_layer = model.model.classifier[1]
 
-    for param in head_params:
-        param.requires_grad = True
+    else:
+        raise ValueError("Unsupported model head")
+
+    if partial_unfreeze:
+        backbone = list(backbone_layer.parameters())
+        for p in backbone:
+            p.requires_grad = True
+    head = list(head_layer.parameters())
+
+    for p in head:
+        p.requires_grad = True
+
+    good_label_ids = [i for i in range(head_layer.out_features) if i not in bad_label_ids]
 
     params = [p for p in model.parameters() if p.requires_grad]
     weight_decay = 1e-4
 
     # 4) Build a fresh optimizer optimizer on all unfrozen params
-    optimizer = Adam(params, lr=lr, weight_decay=weight_decay)
+    if partial_unfreeze:
+        optimizer = Adam(
+            [
+                {"params": backbone, "lr": lr_bb},
+                {"params": head, "lr": lr_head},
+            ],
+            weight_decay=weight_decay
+        )
+    else:
+        optimizer = Adam(
+            [
+                {"params": head, "lr": lr_head},
+            ],
+            weight_decay=weight_decay
+        )
 
     # 5) Fine-tune loop
     criterion = nn.BCEWithLogitsLoss()
@@ -248,6 +273,12 @@ def fine_tune_bad_labels(model, train_subset, bad_label_ids, device,
                 labels[:, bad_label_ids]
             )
             loss.backward()
+
+            with torch.no_grad():
+                if head_layer.weight.grad is not None:
+                    head_layer.weight.grad[good_label_ids] = 0
+                if head_layer.bias is not None and head_layer.bias.grad is not None:
+                    head_layer.bias.grad[good_label_ids] = 0
             optimizer.step()
             running_loss += loss.item()
         avg_loss = running_loss / len(ft_loader) if len(ft_loader) > 0 else 0.0
@@ -273,10 +304,13 @@ def find_best_thresholds_per_label(probs: torch.Tensor,
     L = probs_np.shape[1]
     thresholds = np.zeros(L, dtype=np.float16)
 
-    # search grid from min_thr to max_thr
-    grid = np.linspace(min_thr, max_thr, n_grid)
-
     for j in range(L):
+
+        # search grid from min_thr to max_thr. Negatives should not get too low threshold
+        if j == 0:
+            grid = np.linspace(0.5, max_thr, n_grid)
+        else:
+            grid = np.linspace(min_thr, max_thr, n_grid)
 
         y_true = labels_np[:, j]
         p = probs_np[:, j]
@@ -351,13 +385,16 @@ def give_predictions(probs: torch.Tensor,
         neg_pred = (
                 (neg_prob >= neg_thr) &
                 (neg_prob > max_disease_prob) &
-                (top2_disease_sum < (neg_prob + 0.10))
+                (top2_disease_sum < (neg_prob + 0.05))
         ).long()
 
         preds[:, neg_idx] = neg_pred
 
         # If Negative is predicted, force all disease labels to 0.
-        preds[neg_pred == 1][:, disease_cols] = 0
+        mask_neg = (neg_pred == 1)
+        if mask_neg.any():
+            preds[mask_neg] = 0
+            preds[mask_neg, neg_idx] = 1
     else:
         # Keep predictions logically consistent also in the non-derived case:
         # if any disease is predicted, force Negative to 0.

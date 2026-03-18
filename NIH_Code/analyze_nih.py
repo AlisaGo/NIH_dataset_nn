@@ -105,17 +105,17 @@ EXCLUDED_LABELS = {
 }
 
 # -- Partiel unfreeze bad labels --
-partial_unfreeze_bad_labels = True  # Decides if to unfreeze just the head or also the
+partial_unfreeze_bad_labels = False  # Decides if to unfreeze just the head or also the
 # last backbone block of the model for fine-tuning on less performant labels
 
 # -- SUBSET SETTINGS --
-MAX_IMAGES = 20000  # Number of images to use (subset) to keep runtime manageable, this code
+MAX_IMAGES = 60000  # Number of images to use (subset) to keep runtime manageable, this code
 # chooses a representative subset, which is roughly of this size and aims to keep the proportions
 # of different pathologies in the representative subset similar to the original distribution
 # favoring thereby pathologies over negatives
 eval_frac = 0.15  # Wrt. max_images
 NUM_LABELS_ALL = 14
-NUM_LABELS = 11  # Use only this number of abels, choosing the most frequent in descending
+NUM_LABELS = 11  # Use only this number of labels, choosing the most frequent in descending
 # order
 
 NUM_LABELS = min(NUM_LABELS_ALL - len(EXCLUDED_LABELS), NUM_LABELS)
@@ -146,6 +146,9 @@ train_full_model = True
 # Preset and update pos. weights of the loss function
 preset_pos_weights = False
 update_pos_weights = False
+
+# -- Save models --
+want_save_model = False
 
 # -- NIH dataset has 14 disease train_labels --
 DISEASE_LABELS = [
@@ -408,8 +411,9 @@ if __name__ == "__main__":
 
         model_dir = os.path.join(".", "Models")
         os.makedirs(model_dir, exist_ok=True)
-        save_model(my_model, optimizer, epoch, prob_thresholds, top_labels,
-                   "./Models/model_standard.pt")
+        if want_save_model:
+            save_model(my_model, optimizer, epoch, prob_thresholds, top_labels,
+                       "./Models/model_standard.pt")
 
         # Placeholder fine-tuned model
         my_model_wft = None
@@ -419,33 +423,48 @@ if __name__ == "__main__":
         # where fn / (fn + tp) = fn_rate >= 0.3,
         # bad_labels should just choose the id of the disease with too high fn_rates
         neg_idx = list(top_labels).index("Negative")
-        bad_labels = [i for i in np.where(fn_rate > 0.4)[0].tolist() if i != neg_idx]
+        train_pos_counts = train_labels.sum(axis=0)
+
+        bad_labels = [
+            i for i in np.where(fn_rate > 0.40)[0].tolist()
+            if i != neg_idx
+               and train_pos_counts[i] >= 100
+        ]
         if bad_labels:
 
             print(f"{'━' * 15} Fine Tuning {'━' * 15}")
             my_model_wft = copy.deepcopy(my_model)
+
             my_model_wft, optimizer_wft = fine_tune_bad_labels(my_model_wft, train_loader.dataset,
                                                                bad_labels, device,
                                                                partial_unfreeze_bad_labels,
-                                                               pin_memory, n_epochs=2,
-                                                               lr=1e-4)
+                                                               pin_memory)
 
             # Recalculate probability thresholds
             all_predictions, all_probs, all_labels, all_patient_ids, val_loss_avg \
                 = validate_one_epoch(my_model_wft, tune_loader, device, criterion, thr_tensor,
                                      use_amp)
 
-            prob_thresholds_wft = find_best_thresholds_per_label(probs=all_probs,
+            prob_thresholds_wft_raw = find_best_thresholds_per_label(probs=all_probs,
                                                                  labels=all_labels,
                                                                  n_grid=40)
+
+            alpha_thr = 0.7  # more weight to standard thresholds
+            prob_thresholds_wft = alpha_thr * prob_thresholds + (
+                        1.0 - alpha_thr) * prob_thresholds_wft_raw
+
+            neg_idx = list(top_labels).index("Negative")
+            prob_thresholds_wft[neg_idx] = max(prob_thresholds_wft[neg_idx], 0.5)
+
             thr_tensor_wft = torch.as_tensor(prob_thresholds_wft,
                                              device=device, dtype=torch.float32).view(1, -1)
 
             for label, thr in zip(top_labels, prob_thresholds_wft):
                 print(f"{label}: {thr:.3f}")
 
-            save_model(my_model_wft, optimizer_wft, epoch, prob_thresholds_wft, top_labels,
-                       "./Models/model_finetuned.pt")
+            if want_save_model:
+                save_model(my_model_wft, optimizer_wft, epoch, prob_thresholds_wft, top_labels,
+                           "./Models/model_finetuned.pt")
 
         # Statistics
         # =========================
