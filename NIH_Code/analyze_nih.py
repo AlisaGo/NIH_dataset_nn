@@ -44,8 +44,7 @@ Patients by number of labels that change across their images
 
 # import
 import time
-from cmath import inf
-
+import copy
 import numpy as np
 import torch
 import torch.nn as nn
@@ -59,14 +58,13 @@ from functions import (
     train_one_epoch,
     validate_one_epoch,
     fine_tune_bad_labels,
-    give_epoch_stats,
-    plot_roc_curve,
-    plot_images_classification,
     find_best_thresholds_per_label,
-    set_global_seed
+    set_global_seed,
+    save_model,
+    save_and_plot
 )
 
-from performance_metrics import compute_fn_fp_rate, compute_weighted_f1
+from performance_metrics import evaluate_and_report
 from torch.optim import Adam
 
 #############################################
@@ -111,7 +109,7 @@ partial_unfreeze_bad_labels = True  # Decides if to unfreeze just the head or al
 # last backbone block of the model for fine-tuning on less performant labels
 
 # -- SUBSET SETTINGS --
-MAX_IMAGES = 2000  # Number of images to use (subset) to keep runtime manageable, this code
+MAX_IMAGES = 20000  # Number of images to use (subset) to keep runtime manageable, this code
 # chooses a representative subset, which is roughly of this size and aims to keep the proportions
 # of different pathologies in the representative subset similar to the original distribution
 # favoring thereby pathologies over negatives
@@ -136,7 +134,7 @@ NUM_WORKERS = 2
 
 # -- Stopping criteria  --
 f1_neg_threshold = 0.85
-f1_pos_threshold = 0.30
+f1_pos_threshold = 0.4
 delta_loss = 0.002
 
 # -- Model --
@@ -327,10 +325,10 @@ if __name__ == "__main__":
             # =========================
             print(f"{'━' * 15} Optimize Probability Thresholds {'━' * 15}")
             t0 = time.time()
-
+            thr_tensor = torch.as_tensor(prob_thresholds, device=device,
+                                         dtype=torch.float32).view(1, -1)
             if thresholds_by_disease:
-                thr_tensor = torch.as_tensor(prob_thresholds, device=device,
-                                             dtype=torch.float32).view(1, -1)
+
                 all_predictions, all_probs, all_labels, all_patient_ids, val_loss_avg \
                     = validate_one_epoch(my_model, tune_loader, device, criterion, thr_tensor,
                                          use_amp)
@@ -346,23 +344,30 @@ if __name__ == "__main__":
         print(f"{'━' * 15} Evaluation {'━' * 15}")
         t0 = time.time()
 
-        thr_tensor = torch.as_tensor(prob_thresholds, device=device, dtype=torch.float32).view(1,
-                                                                                               -1)
-        # Each epoch validation is taking place on the tune_loader, as this
-        # validation result is used as early stopping criteria.
-        all_predictions, all_probs, all_labels, all_patient_ids, val_loss_avg \
-            = validate_one_epoch(my_model, tune_loader, device, criterion, thr_tensor, use_amp,
-                                 derive_negatives)
+        eval_results_training = evaluate_and_report(
+            model=my_model,
+            loader=tune_loader,
+            device=device,
+            criterion=criterion,
+            prob_thresholds=prob_thresholds,
+            use_amp=use_amp,
+            derive_negatives=derive_negatives,
+            top_labels=top_labels,
+            NUM_EPOCHS=NUM_EPOCHS,
+            epoch=epoch,
+            train_loss_avg=train_loss_avg,
+            give_stats=True,
+            final_evaluation=False,
+            title="Statistics on Tune Set"
+        )
 
-        stop_metric, f1_neg, f1_pos = compute_weighted_f1(predictions=all_predictions,
-                                                          labels=all_labels,
-                                                          top_labels=top_labels)
-
-        [fn_rate, fp_rate] = compute_fn_fp_rate(all_predictions, all_labels)
+        val_loss_avg = eval_results_training["val_loss_avg"]
+        fn_rate = eval_results_training["fn_rate"]
+        f1_neg = eval_results_training["f1_neg"]
+        f1_pos = eval_results_training["f1_pos"]
 
         dt = time.time() - t0
         print(f"Test Validation sec:", round(dt, 2))
-
 
         if epoch >= 1 and update_pos_weights:
             pos_weight = abs(1.0 / (1.0 - 0.2 * fn_rate + 1e-6))
@@ -390,47 +395,95 @@ if __name__ == "__main__":
             else:
                 val_loss_min = min(val_loss_avg, val_loss_min)
 
-            print(f"{'━' * 15} Statistics on Tune Set {'━' * 15}")
-            val_accuracy, eval_stats = give_epoch_stats(f1_neg, f1_pos, NUM_EPOCHS, epoch,
-                                                        top_labels, all_predictions, all_labels,
-                                                        train_loss_avg, val_loss_avg, all_probs,
-                                                        final_evaluation = False)
+            # print(f"{'━' * 15} Statistics on Tune Set {'━' * 15}")
+            # val_accuracy, eval_stats = give_epoch_stats(f1_neg, f1_pos, NUM_EPOCHS, epoch,
+            #                                             top_labels, all_predictions, all_labels,
+            #                                             train_loss_avg, val_loss_avg, all_probs,
+            #                                             final_evaluation=False)
 
             if early_stopping:
                 break
 
     if early_stopping or epoch == NUM_EPOCHS - 1:
 
+        model_dir = os.path.join(".", "Models")
+        os.makedirs(model_dir, exist_ok=True)
+        save_model(my_model, optimizer, epoch, prob_thresholds, top_labels,
+                   "./Models/model_standard.pt")
+
+        # Placeholder fine-tuned model
+        my_model_wft = None
+        thr_tensor_wft = None
         # Finetuning
         # Fine tune the last layer only for those train_labels,
         # where fn / (fn + tp) = fn_rate >= 0.3,
         # bad_labels should just choose the id of the disease with too high fn_rates
-        bad_labels = np.where(fn_rate > 0.30)[0].tolist()
+        neg_idx = list(top_labels).index("Negative")
+        bad_labels = [i for i in np.where(fn_rate > 0.4)[0].tolist() if i != neg_idx]
         if bad_labels:
-            print(f"{'━' * 15} Fine Tuning {'━' * 15}")
 
-            my_model = fine_tune_bad_labels(my_model, train_loader.dataset, bad_labels, device,
-                                            partial_unfreeze_bad_labels, pin_memory, n_epochs=2,
-                                            lr=1e-4)
+            print(f"{'━' * 15} Fine Tuning {'━' * 15}")
+            my_model_wft = copy.deepcopy(my_model)
+            my_model_wft, optimizer_wft = fine_tune_bad_labels(my_model_wft, train_loader.dataset,
+                                                               bad_labels, device,
+                                                               partial_unfreeze_bad_labels,
+                                                               pin_memory, n_epochs=2,
+                                                               lr=1e-4)
+
+            # Recalculate probability thresholds
+            all_predictions, all_probs, all_labels, all_patient_ids, val_loss_avg \
+                = validate_one_epoch(my_model_wft, tune_loader, device, criterion, thr_tensor,
+                                     use_amp)
+
+            prob_thresholds_wft = find_best_thresholds_per_label(probs=all_probs,
+                                                                 labels=all_labels,
+                                                                 n_grid=40)
+            thr_tensor_wft = torch.as_tensor(prob_thresholds_wft,
+                                             device=device, dtype=torch.float32).view(1, -1)
+
+            for label, thr in zip(top_labels, prob_thresholds_wft):
+                print(f"{label}: {thr:.3f}")
+
+            save_model(my_model_wft, optimizer_wft, epoch, prob_thresholds_wft, top_labels,
+                       "./Models/model_finetuned.pt")
 
         # Statistics
         # =========================
-        print(f"{'━' * 15} Statistics on Test Set {'━' * 15}")
-        all_predictions, all_probs, all_labels, all_patient_ids, val_loss_avg \
-            = validate_one_epoch(my_model, test_loader, device, criterion, thr_tensor, use_amp,
-                                 derive_negatives)
+        print(f"{'━' * 15} Final Performance Evaluation {'━' * 15}")
+        standard_results = evaluate_and_report(
+            model=my_model,
+            loader=test_loader,
+            device=device,
+            criterion=criterion,
+            prob_thresholds=prob_thresholds,
+            use_amp=use_amp,
+            derive_negatives=derive_negatives,
+            top_labels=top_labels,
+            NUM_EPOCHS=NUM_EPOCHS,
+            epoch=epoch,
+            train_loss_avg=train_loss_avg,
+            give_stats=True,
+            final_evaluation=True,
+            title="Statistics on Test Set for standard model"
+        )
 
-        [fn_rate, fp_rate] = compute_fn_fp_rate(all_predictions, all_labels)
-        _, f1_neg, f1_pos = compute_weighted_f1(predictions=all_predictions,
-                                                          labels=all_labels,
-                                                          top_labels=top_labels)
-
-        val_accuracy, eval_stats = give_epoch_stats(f1_neg, f1_pos, NUM_EPOCHS, epoch,
-                                                    top_labels, all_predictions, all_labels,
-                                                    train_loss_avg, val_loss_avg, all_probs,
-                                                    final_evaluation = True)
-
-
+        if my_model_wft is not None:
+            results_wft = evaluate_and_report(
+                model=my_model_wft,
+                loader=test_loader,
+                device=device,
+                criterion=criterion,
+                prob_thresholds=prob_thresholds_wft,
+                use_amp=use_amp,
+                derive_negatives=derive_negatives,
+                top_labels=top_labels,
+                NUM_EPOCHS=NUM_EPOCHS,
+                epoch=epoch,
+                train_loss_avg=train_loss_avg,
+                give_stats=True,
+                final_evaluation=True,
+                title="Statistics on Test Set for fine tuned model"
+            )
 
     end = time.perf_counter()
 
@@ -444,15 +497,10 @@ if __name__ == "__main__":
     eval_dir = os.path.join(".", "Evaluation")
     os.makedirs(eval_dir, exist_ok=True)
 
-    eval_csv_path = os.path.join(eval_dir, "nih_eval_stats.csv")
-    eval_stats.to_csv(eval_csv_path, index=False)
-    print("Writing Statistics to \n", os.path.abspath(eval_csv_path))
-
-    print('Plotting roc curves')
-    plot_roc_curve(all_probs, all_labels, top_labels, eval_dir)
-
-    print('Plotting image samples')
-    plot_images_classification(my_model, test_loader, device, top_labels, thr_tensor, mean, std,
-                               eval_dir, derive_negatives)
+    save_and_plot(standard_results, eval_dir, top_labels, my_model, test_loader, device,
+                  prob_thresholds, mean, std, derive_negatives, name='_std')
+    if my_model_wft is not None:
+        save_and_plot(results_wft, eval_dir, top_labels, my_model_wft, test_loader, device,
+                      prob_thresholds_wft, mean, std, derive_negatives, name='_wft')
     end1 = time.perf_counter()
     print(f"Elapsed for stats/pics: {end1 - start1:.1f} seconds")

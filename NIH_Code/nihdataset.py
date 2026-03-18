@@ -1,7 +1,7 @@
 """
 nihdataset.py
 
-Custom Dataset for NIH Chest X-Ray images:
+Custom Dataset and preprocessing utilities for NIH Chest X-Ray images:
 
 Classes:
   NIHChestXRayDataset:
@@ -9,38 +9,67 @@ Classes:
       - Load NIH metadata CSV and image file paths.
       - When use_cache is set to true, load jpeg images from cache directory.
       - One-hot encode each finding label into its own column.
-      - Optionally remove noisy/blurry images.
-      - Subsample a balanced, representative subset of size `max_size` across the top `top_x` train_labels.
+      - Optionally select only the top `top_x` labels.
+      - Build either:
+          • a full train / tune / test split
+          • or representative train / tune / test subsets when `max_size` is smaller than the dataset.
       - Build an internal list of (image_path, label_vector, patient_id, split) tuples,
-# where split is one of "train", "tune", or "test".
+        where split is one of "train", "tune", or "test".
 
     __len__:
       - Return the number of samples in the dataset.
 
     __getitem__:
-      - Given an index, load the corresponding image, apply transforms, and return image tensor + label tensor.
+      - Given an index, load the corresponding image, apply split-specific transforms,
+        and return image tensor + label tensor + patient ID.
 
     give_nih_dataset:
-      - Read `Data_Entry_2017.csv`, map each “Image Index” to its filesystem path, and store valid entries.
+      - Read `Data_Entry_2017.csv`, map each “Image Index” to its filesystem path,
+        and store only valid entries with an existing image file.
 
     set_binary_labels:
       - Rename “No Finding” to “Negative” and split the multi-label string into individual binary columns.
       - Compute and store the overall label frequency distribution.
+      - Print image-level and patient-level label statistics.
 
     remove_noisy_images:
       - Filter out images whose Laplacian variance falls below a threshold (blurry or unreadable).
 
     is_noisy:
-      - Compute the variance of the Laplacian on a grayscale image to detect blur; returns True if noisy.
+      - Compute the variance of the Laplacian on a grayscale image to detect blur;
+        return True if the image is considered noisy or cannot be read.
+
+    make_train_tune_val_split:
+      - Build patient-wise train / tune / test splits.
+      - Use either a random split or the official NIH split files when requested.
+
+    give_official_split:
+      - Read the official NIH train / validation and test file lists,
+        and return the corresponding row indices.
+
+    select_top_labels:
+      - Keep only the top `top_x` most frequent labels and remove rows
+        that do not contain any of those labels.
 
     build_representative_subset:
-      - Identify the `top_x` most common train_labels and compute sampling fractions to balance them up to `max_size`.
-      - Sample without replacement per label and concatenate into the final DataFrame.
+      - Construct a patient-wise representative subset of approximately `max_size`
+        using the selected top labels and adjusted label proportions.
+
+    sample_patients:
+      - Sample patients without replacement until the requested number of images is reached,
+        then return the selected rows and the remaining DataFrame.
 
     plot_disease_distribution:
-      - Plot a bar chart of the top N “Finding Labels” frequencies for quick EDA.
-"""
+      - Plot a bar chart of the most frequent “Finding Labels” strings for quick EDA.
 
+  XRayStandardize:
+    __init__:
+      - Configure grayscale conversion, percentile clipping, and optional resizing.
+
+    __call__:
+      - Convert an X-ray to grayscale, apply percentile clipping and normalization,
+        optionally resize it, and replicate it to RGB format.
+"""
 
 import torch
 from torch.utils.data import Dataset
@@ -59,16 +88,16 @@ class NIHChestXRayDataset(Dataset):
                  main_dir,
                  label_file,
                  use_official_split,
-                 train_val_list_path = None,
-                 test_list_path = None,
+                 train_val_list_path=None,
+                 test_list_path=None,
                  max_size=5000,
-                 eval_frac = 0.15,
+                 eval_frac=0.15,
                  top_x=6,
                  train_transform=None,
                  eval_transform=None,
                  excluded_labels=None,
                  cache_dir=None,
-                 random_seed = 42,
+                 random_seed=42,
                  use_cache=False):
 
         self.random_seed = random_seed
@@ -120,19 +149,18 @@ class NIHChestXRayDataset(Dataset):
                 test_df = self.data_df.iloc[test_idx]
             else:
                 train_df = self.data_df
-            train_df, remaining_df = self.build_representative_subset(xray_df = train_df,
-                                                                     max_size = self.max_size, )
+            train_df, remaining_df = self.build_representative_subset(xray_df=train_df,
+                                                                      max_size=self.max_size, )
             eval_target = int(self.max_size * self.eval_frac)
 
-            tune_df, remaining_df = self.build_representative_subset(xray_df = remaining_df,
-                                                            max_size = eval_target, )
+            tune_df, remaining_df = self.build_representative_subset(xray_df=remaining_df,
+                                                                     max_size=eval_target, )
             if use_official_split:
-                test_df,_ = self.build_representative_subset(xray_df = test_df,
-                                                            max_size = eval_target)
+                test_df, _ = self.build_representative_subset(xray_df=test_df,
+                                                              max_size=eval_target)
             else:
                 test_df, _ = self.build_representative_subset(xray_df=remaining_df,
                                                               max_size=eval_target)
-
 
             self.data_df = pd.concat(
                 [
@@ -146,8 +174,7 @@ class NIHChestXRayDataset(Dataset):
             self.tune_idx = self.data_df.index[self.data_df["split"] == "tune"].to_numpy()
             self.test_idx = self.data_df.index[self.data_df["split"] == "test"].to_numpy()
         else:
-                self.make_train_tune_val_split()
-
+            self.make_train_tune_val_split()
 
         # 5) Store the samples as (img_path, label_vector,patient_id) triples in a Python list
         sample_cols = ["path", "Patient ID", "split"] + list(self.top_labels)
@@ -195,7 +222,7 @@ class NIHChestXRayDataset(Dataset):
             ]
         elif self.use_cache == True:
             patterns = [
-                os.path.join(self.cache_dir,"*.jpg"),
+                os.path.join(self.cache_dir, "*.jpg"),
                 # os.path.join(main_dir, 'images_002/images', '*.png'),
             ]
         # Collect images from each pattern into one dictionary
@@ -208,7 +235,8 @@ class NIHChestXRayDataset(Dataset):
         print('Scans found:', len(all_image_paths), ', Total Headers:', all_xray_df.shape[0])
         # Map each Image Index to its full file path
         if self.use_cache:
-            all_xray_df["cache_name"] = all_xray_df["Image Index"].str.replace(".png", ".jpg", regex=False)
+            all_xray_df["cache_name"] = all_xray_df["Image Index"].str.replace(".png", ".jpg",
+                                                                               regex=False)
             all_xray_df["path"] = all_xray_df["cache_name"].map(all_image_paths.get)
         else:
             all_xray_df["path"] = all_xray_df["Image Index"].map(all_image_paths.get)
@@ -235,7 +263,8 @@ class NIHChestXRayDataset(Dataset):
         """
         all_xray_df = self.data_df
         # Rename 'No Finding' -> 'Negative'
-        all_xray_df['Finding Labels'] = all_xray_df['Finding Labels'].map(lambda x: x.replace('No Finding', 'Negative'))
+        all_xray_df['Finding Labels'] = all_xray_df['Finding Labels'].map(
+            lambda x: x.replace('No Finding', 'Negative'))
 
         # Collect all unique train_labels by splitting on '|'
         all_labels = np.unique(
@@ -311,7 +340,7 @@ class NIHChestXRayDataset(Dataset):
     def make_train_tune_val_split(self):
         nih_dataset = self.data_df
         use_official_split = self.use_official_split
-        train_val_list_path= self.train_val_list_path
+        train_val_list_path = self.train_val_list_path
         test_list_path = self.test_list_path
         eval_frac = self.eval_frac
         tune_frac = eval_frac
@@ -333,7 +362,7 @@ class NIHChestXRayDataset(Dataset):
             n_tune = int(len(unique_patients) * tune_frac)
             tune_patients = set(unique_patients[n_test:n_test + n_tune])
 
-            train_patients = set(unique_patients[n_test+n_tune:])
+            train_patients = set(unique_patients[n_test + n_tune:])
 
             # 4) Assign image indices based on patient membership
             test_idx = np.where(np.isin(patient_ids, list(test_patients)))[0]
@@ -437,8 +466,8 @@ class NIHChestXRayDataset(Dataset):
         # If there are twice as many negatives as the most common illness, set the fraction of
         # negatives to be twice as big as the fraction of the most common illness
         neg_idx = list(top_labels).index("Negative")
-        assert(neg_idx == 0)
-        relation_neg_pos = label_counts_sorted.iloc[0] /label_counts_sorted.iloc[1]
+        assert (neg_idx == 0)
+        relation_neg_pos = label_counts_sorted.iloc[0] / label_counts_sorted.iloc[1]
         if relation_neg_pos > 2:
             relation_neg_pos_used = 2
         else:
@@ -480,7 +509,7 @@ class NIHChestXRayDataset(Dataset):
 
             if n_samples > 0:
                 chosen_df, remaining_df, picked_images_len = self.sample_patients(
-                    n_samples, subset_df, remaining_df,self.random_seed
+                    n_samples, subset_df, remaining_df, self.random_seed
                 )
 
                 if chosen_df is not None and len(chosen_df) > 0:
@@ -504,7 +533,7 @@ class NIHChestXRayDataset(Dataset):
             # Fill with positives first
             if need > 0 and len(pos_pool) > 0:
                 chosen_df, remaining_df, picked_images_len = self.sample_patients(
-                    need, pos_pool, remaining_df,self.random_seed
+                    need, pos_pool, remaining_df, self.random_seed
                 )
 
                 if chosen_df is not None and len(chosen_df) > 0:
@@ -561,7 +590,6 @@ class NIHChestXRayDataset(Dataset):
 
         return chosen_df, remaining_df, picked_images
 
-
     def plot_disease_distribution(self):
         """
         Example: quick bar plot of the top 15 multi-label strings from 'Finding Labels'.
@@ -574,8 +602,9 @@ class NIHChestXRayDataset(Dataset):
         ax1.set_xticklabels(label_counts.index, rotation=90)
         plt.show()
 
+
 class XRayStandardize:
-    def __init__(self,do_rescale= False, size=224, clip_percentiles=(1, 99)):
+    def __init__(self, do_rescale=False, size=224, clip_percentiles=(1, 99)):
         self.do_rescale = do_rescale
         self.size = size
         self.clip_percentiles = clip_percentiles

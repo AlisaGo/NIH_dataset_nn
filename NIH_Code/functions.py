@@ -2,49 +2,57 @@
 functions.py
 
 Main utilities for:
-  • loading and splitting the NIH Chest X-Ray dataset
+  • splitting NIH Chest X-Ray dataset objects into train/validation DataLoaders
   • training and validating a multi-label CNN
-  • computing false-negative rates and per-label metrics
-  • fine-tuning model heads on underperforming train_labels
-  • aggregating epoch statistics
+  • computing predictions from model probabilities using thresholds
+  • fine-tuning the classifier layer on underperforming labels
+  • saving model checkpoints
   • plotting ROC curves and sample classifications
 
 Functions:
   get_data_loaders:
-    Split a NIHChestXRayDataset into train/validation DataLoaders.
+    Split dataset objects into train/validation DataLoaders.
 
   train_one_epoch:
     Run one training pass over the train DataLoader, return updated model and average loss.
 
   validate_one_epoch:
-    Evaluate model on validation DataLoader, return predictions, probabilities, train_labels, and average loss.
+    Evaluate model on validation DataLoader, return predictions, probabilities, labels, and average loss.
+
+  give_predictions:
+    Convert probability outputs into binary predictions using per-label thresholds
+    and optional handling for the "Negative" class.
 
   fine_tune_bad_labels:
-    Freeze backbone and fine-tune only classifier heads on samples whose train_labels exhibit high FN rates.
+    Freeze the backbone and fine-tune only the classifier layer on samples whose labels exhibit high FN rates.
 
-  epoch_stats:
-    Update a pandas DataFrame with per-label confusion counts and performance metrics; print epoch summary.
+  find_best_thresholds_per_label:
+    Calculate best thresholds per label inside a grid based on the F1 score.
+
+  save_model:
+    Save model, optimizer state, epoch, thresholds, and labels to disk.
 
   plot_roc_curve:
     Plot and save one combined figure with multi-label ROC curves using continuous scores.
 
   plot_images_classification:
-    Display and save a grid of correctly and incorrectly classified chest X-rays with predicted vs. true train_labels.
+    Display and save a grid of correctly and incorrectly classified chest X-rays with predicted vs. true labels.
 """
+import os
 import os.path
 import numpy as np
 import time
 
-import pandas as pd
 import torch
+import torch.nn as nn
 from sklearn.metrics import roc_curve, auc
 import matplotlib
+from torch.optim import Adam
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torchvision.transforms as transforms
 from torch.utils.data import Subset, DataLoader
-from performance_metrics import give_eval_stats
 
 
 def get_data_loaders(BATCH_SIZE, NUM_WORKERS,
@@ -187,7 +195,7 @@ def fine_tune_bad_labels(model, train_subset, bad_label_ids, device,
     bad_indices = np.flatnonzero(bad_mask).tolist()
     if len(bad_indices) == 0:
         print("No training samples found for bad train_labels. Skipping fine-tuning.")
-        return model
+        return model, None
 
     # 2) Create a Subset and DataLoader for just those samples
     subset = Subset(train_subset, bad_indices)
@@ -223,11 +231,9 @@ def fine_tune_bad_labels(model, train_subset, bad_label_ids, device,
     weight_decay = 1e-4
 
     # 4) Build a fresh optimizer optimizer on all unfrozen params
-    from torch.optim import Adam
     optimizer = Adam(params, lr=lr, weight_decay=weight_decay)
 
     # 5) Fine-tune loop
-    import torch.nn as nn
     criterion = nn.BCEWithLogitsLoss()
     model.train()
     for epoch in range(n_epochs):
@@ -248,61 +254,13 @@ def fine_tune_bad_labels(model, train_subset, bad_label_ids, device,
         print(f"[Fine-tune {epoch + 1}/{n_epochs}] Loss: {avg_loss:.4f}")
     # 6) Return model to eval mode
     model.eval()
-    return model
-
-
-def give_epoch_stats(f1_neg,
-                     f1_pos,
-                     num_epochs,
-                     epoch,
-                     top_labels,
-                     predictions,
-                     label_tensors,
-                     train_loss_avg,
-                     val_loss_avg,
-                     probs=None,
-                     final_evaluation=False):
-    eval_stats = give_eval_stats(epoch, top_labels, predictions, label_tensors, probs)
-    val_f1_score = round(eval_stats['f1_score'].mean(), 2)  # in [0..1]
-    val_accuracy = round(eval_stats['accuracy'].mean(), 2)  # in [0..1]
-    val_auroc = round(eval_stats['auroc'].mean(), 2)  # in [0..1]
-    # --------------------------------
-    # Print Statistics
-    # --------------------------------
-
-    # Main summary of this epoch
-    print('━' * 60)
-    print(f"{'━' * 15} Epoch Evaluation {'━' * 15}")
-    print(
-        f"Epoch:{epoch + 1}, "
-        f"Train Loss:{train_loss_avg:.2f}, "
-        f"Val Loss:{val_loss_avg:.2f}, "
-        f"Val F1 abs:{val_f1_score * 100:.2f}%, ",
-        f"Val F1 neg:{f1_neg * 100:.2f}%, ",
-        f"Val F1 pos:{f1_pos * 100:.2f}%, "
-        f"Val Accuracy:{val_accuracy * 100:.2f}%, "
-        f"Val Auroc:{val_auroc * 100:.2f}%, "
-    )
-    print(f"{'━' * 15} Per-disease Stats (Epoch {epoch + 1}) {'━' * 15}")
-    print(eval_stats[["label", "total_pos", "precision", "recall", "f1_score", "auroc"]])
-    print('━' * 60)
-
-    # Per-disease stats at final epoch only
-    if epoch == num_epochs - 1 or final_evaluation:
-        pd.set_option("display.max_columns", None)
-        print('━' * 60)
-        print(f"{'━' * 15} Per-disease Stats with detail for final (Epoch {epoch + 1})"
-              f" {'━' * 15}")
-        print(eval_stats[["label", "total_pos",
-                          "tp", "fp", "tn", "fn",
-                          "f1_score", "auroc"]])
-        print('━' * 60)
-
-    return val_accuracy, eval_stats
+    return model, optimizer
 
 
 def find_best_thresholds_per_label(probs: torch.Tensor,
                                    labels: torch.Tensor,
+                                   min_thr=0.25,
+                                   max_thr=0.7,
                                    n_grid: int = 40):
     """
     probs:  [N, L] float in [0,1]
@@ -315,8 +273,8 @@ def find_best_thresholds_per_label(probs: torch.Tensor,
     L = probs_np.shape[1]
     thresholds = np.zeros(L, dtype=np.float16)
 
-    # search grid from 0.1..0.6
-    grid = np.linspace(0.1, 0.6, n_grid)
+    # search grid from min_thr to max_thr
+    grid = np.linspace(min_thr, max_thr, n_grid)
 
     for j in range(L):
 
@@ -339,6 +297,7 @@ def find_best_thresholds_per_label(probs: torch.Tensor,
             rec = tp / (tp + fn + 1e-12)
             f1 = 2 * prec * rec / (prec + rec + 1e-12)
 
+            # optimize threshold based on f1
             if f1 > best_f1:
                 best_f1 = f1
                 best_thr = float(thr)
@@ -349,28 +308,80 @@ def find_best_thresholds_per_label(probs: torch.Tensor,
 
 
 def give_predictions(probs: torch.Tensor,
-                     thr,
+                     thr: torch.Tensor,
                      top_labels,
-                     derive_negatives):
+                     derive_negatives: bool) -> torch.Tensor:
     """
-    probs: [N, L]
-    thresholds: array-like [L] or scalar
-    returns: preds [N,L] long {0,1}
-    """
+    Convert probabilities into binary predictions.
 
-    thr = thr.to(probs.device)
+    Args:
+        probs: Tensor of shape [N, L] with probabilities in [0, 1].
+        thr: Threshold tensor of shape [1, L], [L], or scalar.
+        top_labels: Sequence of label names, including "Negative".
+        derive_negatives: If True, derive the "Negative" label using a
+            competition rule against disease probabilities.
+
+    Returns:
+        preds: Tensor of shape [N, L] with binary predictions {0, 1}.
+    """
+    thr = torch.as_tensor(thr, device=probs.device, dtype=probs.dtype)
+
+    if thr.ndim == 0:
+        thr = thr.view(1, 1)
+    elif thr.ndim == 1:
+        thr = thr.view(1, -1)
+
     preds = (probs > thr).long()
 
+    neg_idx = list(top_labels).index("Negative")
+    disease_cols = [i for i in range(probs.size(1)) if i != neg_idx]
+
     if derive_negatives:
-        neg_idx = list(top_labels).index("Negative")
-        disease_cols = [i for i in range(preds.size(1)) if i != neg_idx]
-        neg_pred = (preds[:, disease_cols].sum(dim=1) == 0).long()
+
+        neg_prob = probs[:, neg_idx]
+        neg_thr = thr[0, neg_idx]
+
+        disease_probs = probs[:, disease_cols]
+        max_disease_prob = disease_probs.max(dim=1).values
+
+        k = min(2, disease_probs.size(1))
+        topk_vals, _ = disease_probs.topk(k=k, dim=1)
+        top2_disease_sum = topk_vals.sum(dim=1)
+
+        neg_pred = (
+                (neg_prob >= neg_thr) &
+                (neg_prob > max_disease_prob) &
+                (top2_disease_sum < (neg_prob + 0.10))
+        ).long()
+
         preds[:, neg_idx] = neg_pred
+
+        # If Negative is predicted, force all disease labels to 0.
+        preds[neg_pred == 1][:, disease_cols] = 0
+    else:
+        # Keep predictions logically consistent also in the non-derived case:
+        # if any disease is predicted, force Negative to 0.
+        has_disease = preds[:, disease_cols].sum(dim=1) > 0
+        preds[has_disease, neg_idx] = 0
 
     return preds
 
 
-def plot_roc_curve(probabilities, label_tensors, top_labels, eval_dir):
+def save_model(model, optimizer, epoch, prob_thresholds, top_labels, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    torch.save({
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "prob_thresholds": prob_thresholds,
+        "top_labels": list(top_labels),
+    }, path)
+
+    print(f"Model saved to {path}")
+
+
+def plot_roc_curve(probabilities, label_tensors, top_labels, eval_dir, name=''):
     """
     Plot multi-label ROC curves and saves them.
     """
@@ -401,7 +412,7 @@ def plot_roc_curve(probabilities, label_tensors, top_labels, eval_dir):
     ax.grid(True)
 
     # show once and save once
-    plt_savepath = os.path.join(eval_dir, 'roc_curves_nih.png')
+    plt_savepath = os.path.join(eval_dir, f"roc_curves_nih{name}.png")
     fig.savefig(plt_savepath)
     print("Saving Roc Curves to \n", os.path.abspath(plt_savepath))
     plt.close(fig)
@@ -415,7 +426,8 @@ def plot_images_classification(model,
                                mean,
                                std,
                                eval_dir,
-                               derive_negatives=True):
+                               derive_negatives=True,
+                               name=''):
     # Reverse normalization
     inv_normalize = transforms.Normalize(
         mean=- mean / std,
@@ -544,9 +556,27 @@ def plot_images_classification(model,
 
     plt.tight_layout()
     plt.subplots_adjust(hspace=0.6, wspace=0.3)
-    plt_savepath = os.path.join(eval_dir, 'image_sample_nih.png')
+    plt_savepath = os.path.join(eval_dir, f"image_sample_nih{name}.png")
     fig.savefig(plt_savepath, dpi=300, bbox_inches='tight')
     plt.close(fig)
+
+
+def save_and_plot(results, eval_dir, top_labels, my_model, test_loader, device,
+                  prob_thresholds, mean, std, derive_negatives, name=''):
+    thr_tensor = (torch.as_tensor(prob_thresholds, device=device, dtype=torch.float32).
+                  view(1, -1))
+    eval_csv_path = os.path.join(eval_dir, f"nih_eval_stats{name}.csv")
+    results["eval_stats"].to_csv(eval_csv_path, index=False)
+    print("Writing Statistics to \n", os.path.abspath(eval_csv_path))
+
+    all_probs = results["all_probs"]
+    all_labels = results["all_labels"]
+    print('Plotting roc curves')
+    plot_roc_curve(all_probs, all_labels, top_labels, eval_dir, name)
+
+    print('Plotting image samples')
+    plot_images_classification(my_model, test_loader, device, top_labels, thr_tensor, mean, std,
+                               eval_dir, derive_negatives, name)
 
 
 import random
