@@ -61,7 +61,8 @@ from functions import (
     find_best_thresholds_per_label,
     set_global_seed,
     save_model,
-    save_and_plot
+    save_and_plot,
+    MultiLabelFocalLoss
 )
 
 from performance_metrics import evaluate_and_report
@@ -135,16 +136,17 @@ NUM_WORKERS = 2
 # -- Stopping criteria  --
 f1_neg_threshold = 0.85
 f1_pos_threshold = 0.4
-delta_loss = 0.002
+delta_loss = 0.02
 
 # -- Model --
 # pretrained_model = 'MultiLabelMobileNet'
 pretrained_model = 'MultiLabelResNet'
 train_full_model = True
 
-# -- Loss function weights --
+# -- Loss function & weights --
+use_focal_loss = True # use focal loss else use
 # Preset and update pos. weights of the loss function
-preset_pos_weights = False
+preset_pos_weights = True
 update_pos_weights = False
 
 # -- Save models --
@@ -272,7 +274,9 @@ if __name__ == "__main__":
     train_labels = nih_data.data_df.iloc[nih_data.train_idx][top_labels].values
 
     print("Setting up nn optimizer.")
-    if preset_pos_weights:
+    if use_focal_loss:
+        criterion = MultiLabelFocalLoss(alpha=0.25, gamma=2.0, reduction="mean")
+    elif not use_focal_loss and preset_pos_weights:
         pos = train_labels.sum(axis=0)
         N = train_labels.shape[0]
         pos = np.clip(pos, 1, None)
@@ -281,7 +285,7 @@ if __name__ == "__main__":
         pos_weight = np.log(pos_weight) + 1
         pos_weight = torch.tensor(pos_weight, dtype=torch.float32).to(device)
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    else:
+    elif not use_focal_loss and not preset_pos_weights:
         criterion = nn.BCEWithLogitsLoss()
 
     if train_full_model:
@@ -372,7 +376,7 @@ if __name__ == "__main__":
         dt = time.time() - t0
         print(f"Test Validation sec:", round(dt, 2))
 
-        if epoch >= 1 and update_pos_weights:
+        if epoch >= 1 and update_pos_weights and not use_focal_loss:
             pos_weight = abs(1.0 / (1.0 - 0.2 * fn_rate + 1e-6))
             pos_weight = pos_weight.to(device)
             criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -450,8 +454,12 @@ if __name__ == "__main__":
                                                                  n_grid=40)
 
             alpha_thr = 0.7  # more weight to standard thresholds
-            prob_thresholds_wft = alpha_thr * prob_thresholds + (
-                        1.0 - alpha_thr) * prob_thresholds_wft_raw
+            prob_thresholds_wft = prob_thresholds
+            for i in bad_labels:
+                prob_thresholds_wft[i] = (
+                        alpha_thr * prob_thresholds_wft[i]
+                        + (1.0 - alpha_thr) * prob_thresholds_wft_raw[i]
+                )
 
             neg_idx = list(top_labels).index("Negative")
             prob_thresholds_wft[neg_idx] = max(prob_thresholds_wft[neg_idx], 0.5)

@@ -48,6 +48,7 @@ import torch.nn as nn
 from sklearn.metrics import roc_curve, auc
 import matplotlib
 from torch.optim import Adam
+from torchvision.ops import sigmoid_focal_loss
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -630,3 +631,21 @@ def set_global_seed(seed: int = 42) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+
+
+class MultiLabelFocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction="mean"):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits, targets):
+        targets = targets.float()
+        return sigmoid_focal_loss(
+            logits,
+            targets,
+            alpha=self.alpha,
+            gamma=self.gamma,
+            reduction=self.reduction
+        )
