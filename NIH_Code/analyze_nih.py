@@ -61,12 +61,14 @@ from functions import (
     find_best_thresholds_per_label,
     set_global_seed,
     save_model,
-    save_and_plot,
-    MultiLabelFocalLoss
+    save_and_plot
 )
 
+from loss_functions import (BCEFocalComboLoss)
+
 from performance_metrics import evaluate_and_report
-from torch.optim import Adam
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 #############################################
 # 1) USER CONFIGURATION SECTION
@@ -110,7 +112,7 @@ partial_unfreeze_bad_labels = False  # Decides if to unfreeze just the head or a
 # last backbone block of the model for fine-tuning on less performant labels
 
 # -- SUBSET SETTINGS --
-MAX_IMAGES = 60000  # Number of images to use (subset) to keep runtime manageable, this code
+MAX_IMAGES = 6000  # Number of images to use (subset) to keep runtime manageable, this code
 # chooses a representative subset, which is roughly of this size and aims to keep the proportions
 # of different pathologies in the representative subset similar to the original distribution
 # favoring thereby pathologies over negatives
@@ -129,7 +131,7 @@ thresholds_by_disease = True  # Optimize threshold per disease to improve f1 sco
 derive_negatives = True  # The Negative label is assigned if no disease probability exceeds its threshold.
 
 # -- EPOCHS SETTINGS --
-NUM_EPOCHS = 3
+NUM_EPOCHS = 2
 BATCH_SIZE = 32
 NUM_WORKERS = 2
 
@@ -141,13 +143,18 @@ delta_loss = 0.02
 # -- Model --
 # pretrained_model = 'MultiLabelMobileNet'
 pretrained_model = 'MultiLabelResNet'
-train_full_model = True
+train_full_model = False
+freeze_mode_stage1 = "head_only"
+freeze_mode_stage2 = "last_block"
+unfreeze_epoch = 2
 
 # -- Loss function & weights --
-use_focal_loss = True # use focal loss else use
-# Preset and update pos. weights of the loss function
-preset_pos_weights = True
-update_pos_weights = False
+bce_weight = 0.85  # Allows to use a combo model of BCE and Focal loss
+# (with focal weight = 1- bce_weight).
+# Setting the respective weight to 1-0 switches between models.
+focal_gamma = 1.2
+pos_weight_type=None # None, "sqrt_ratio", "prefer_rarest"
+update_pos_weights = True
 
 # -- Save models --
 want_save_model = False
@@ -227,6 +234,9 @@ if __name__ == "__main__":
             translate=(0.02, 0.02),
             scale=(0.98, 1.02)
         ),
+        transforms.RandomResizedCrop(224, scale=(0.9, 1.0)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ColorJitter(brightness=0.15, contrast=0.15),
         transforms.ToTensor(),
         transforms.Normalize(mean=mean, std=std)
     ])
@@ -274,43 +284,39 @@ if __name__ == "__main__":
     train_labels = nih_data.data_df.iloc[nih_data.train_idx][top_labels].values
 
     print("Setting up nn optimizer.")
-    if use_focal_loss:
-        criterion = MultiLabelFocalLoss(alpha=0.25, gamma=2.0, reduction="mean")
-    elif not use_focal_loss and preset_pos_weights:
-        pos = train_labels.sum(axis=0)
-        N = train_labels.shape[0]
-        pos = np.clip(pos, 1, None)
-        pos_weight = (N - pos) / pos
-        pos_weight = np.clip(pos_weight, 1.0, None)
-        pos_weight = np.log(pos_weight) + 1
-        pos_weight = torch.tensor(pos_weight, dtype=torch.float32).to(device)
-        criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    elif not use_focal_loss and not preset_pos_weights:
-        criterion = nn.BCEWithLogitsLoss()
+    criterion = BCEFocalComboLoss(
+        train_labels=train_labels,
+        device=device,
+        bce_weight=bce_weight,
+        focal_alpha=0.25,
+        focal_gamma=focal_gamma,
+        pos_weight_type=pos_weight_type,
+        pos_weight_cap=4.0,
+        gap_weight_strength=0.5,
+    )
 
     if train_full_model:
-        lr = 1e-4
+        lr = 1e-5
         weight_decay = 1e-4
-
-        for param in my_model.parameters():
-            param.requires_grad = True
-
-        params = my_model.parameters()
-
+        my_model.set_trainable("full")
     else:
         lr = 1e-3
         weight_decay = 0.0
-        if pretrained_model == "MultiLabelMobileNet":
-            params = my_model.model.classifier.parameters()
-        elif pretrained_model == "MultiLabelResNet":
-            params = my_model.model.fc.parameters()
+        my_model.set_trainable(freeze_mode_stage1)
 
-    optimizer = Adam(params,
-                     lr=lr,
-                     # betas=(0.9, 0.999),
-                     # eps=1e-8,
-                     weight_decay=weight_decay
-                     )
+    optimizer = AdamW(
+        my_model.get_trainable_parameters(),
+        lr=lr,
+        weight_decay=weight_decay,
+    )
+
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=1,
+        min_lr=1e-6
+    )
 
     #############################################
     # 4) Training and Evaluation
@@ -323,6 +329,25 @@ if __name__ == "__main__":
         print(f"{'━' * 15} Epoch: {epoch + 1} {'━' * 15}")
         # ━━━━━━━━━━━━━━━━━━ Training ━━━━━━━━━━━━━━━━━
         print(f"{'━' * 15} Training {'━' * 15}")
+
+        if not train_full_model and epoch == unfreeze_epoch:
+            print(f"{'━' * 15} Unfreezing higher layers {'━' * 15}")
+            my_model.set_trainable(freeze_mode_stage2)
+
+            optimizer = AdamW(
+                my_model.get_trainable_parameters(),
+                lr=lr,
+                weight_decay=weight_decay,
+            )
+
+            scheduler = ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=0.5,
+                patience=1,
+                min_lr=1e-6
+            )
+
         my_model, train_loss_avg = train_one_epoch(my_model, criterion, optimizer, train_loader,
                                                    device, scaler, use_amp)
 
@@ -368,24 +393,20 @@ if __name__ == "__main__":
             title="Statistics on Tune Set"
         )
 
+        all_probs = eval_results_training["all_probs"]
+        all_labels = eval_results_training["all_labels"]
         val_loss_avg = eval_results_training["val_loss_avg"]
         fn_rate = eval_results_training["fn_rate"]
         f1_neg = eval_results_training["f1_neg"]
         f1_pos = eval_results_training["f1_pos"]
 
+        scheduler.step(val_loss_avg)
+
         dt = time.time() - t0
         print(f"Test Validation sec:", round(dt, 2))
 
-        if epoch >= 1 and update_pos_weights and not use_focal_loss:
-            pos_weight = abs(1.0 / (1.0 - 0.2 * fn_rate + 1e-6))
-            pos_weight = pos_weight.to(device)
-            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        # if max(fp_rate) < 0.11 and (max(fn_rate) > 0.5 or np.mean(fn_rate) > 0.3):
-        #     pos_weight = 1.0 / (1.0 - 0.1 * fn_rate + 1e-6)
-        #     pos_weight = pos_weight.to(device)
-        #     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        # else:
-        #     criterion = nn.BCEWithLogitsLoss()
+        if epoch >= 1 and update_pos_weights:
+            criterion.update_weights(all_probs=all_probs, all_labels=all_labels)
 
         if epoch < NUM_EPOCHS - 1:
             if f1_neg >= f1_neg_threshold and f1_pos > f1_pos_threshold:
@@ -445,16 +466,18 @@ if __name__ == "__main__":
                                                                pin_memory)
 
             # Recalculate probability thresholds
+            thr_tensor = torch.as_tensor(prob_thresholds, device=device, dtype=torch.float32).view(
+                1, -1)
             all_predictions, all_probs, all_labels, all_patient_ids, val_loss_avg \
                 = validate_one_epoch(my_model_wft, tune_loader, device, criterion, thr_tensor,
                                      use_amp)
 
             prob_thresholds_wft_raw = find_best_thresholds_per_label(probs=all_probs,
-                                                                 labels=all_labels,
-                                                                 n_grid=40)
+                                                                     labels=all_labels,
+                                                                     n_grid=40)
 
             alpha_thr = 0.7  # more weight to standard thresholds
-            prob_thresholds_wft = prob_thresholds
+            prob_thresholds_wft = prob_thresholds.copy()
             for i in bad_labels:
                 prob_thresholds_wft[i] = (
                         alpha_thr * prob_thresholds_wft[i]
