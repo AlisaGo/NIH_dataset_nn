@@ -370,6 +370,8 @@ def give_predictions(probs: torch.Tensor,
     neg_idx = list(top_labels).index("Negative")
     disease_cols = [i for i in range(probs.size(1)) if i != neg_idx]
 
+    no_disease_over_threshold = preds[:, disease_cols].sum(dim=1) == 0
+
     if derive_negatives:
 
         neg_prob = probs[:, neg_idx]
@@ -389,6 +391,8 @@ def give_predictions(probs: torch.Tensor,
         ).long()
 
         preds[:, neg_idx] = neg_pred
+        # If no disease predicted set negative to avoid all labels = 0 case
+        preds[no_disease_over_threshold,neg_idx] = 1
 
         # If Negative is predicted, force all disease labels to 0.
         mask_neg = (neg_pred == 1)
