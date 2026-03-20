@@ -782,8 +782,7 @@ In the benchmark experiments:
 - labels with `fn_rate > 0.30` were selected  
 - `n_epochs = 1`  
 - `lr = 1e-5`  
-- `partial_unfreeze_bad_labels = False`  
-
+- `partial_unfreeze_bad_labels = False`
 This fine-tuning step did **not improve performance** and in some cases
 slightly degraded it.
 A likely reason is that focusing on a subset of labels can distort previously
