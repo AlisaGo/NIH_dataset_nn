@@ -24,7 +24,8 @@ Functions:
     and optional handling for the "Negative" class.
 
   fine_tune_bad_labels:
-    Freeze the backbone and fine-tune only the classifier layer on samples whose labels exhibit high FN rates.
+    Freeze the backbone and fine-tune only the classifier layer and optionally the last backbone block
+     on samples whose labels exhibit high FN rates.
 
   find_best_thresholds_per_label:
     Calculate best thresholds per label inside a grid based on the F1 score.

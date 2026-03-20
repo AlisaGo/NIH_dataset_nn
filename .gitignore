@@ -5,7 +5,9 @@ alis_venv/
 Data/
 Evaluation/
 Evaluation_v1
-README_NIH_dataset_nn.md
+
+# models
+Models/
 
 # python cache
 __pycache__/

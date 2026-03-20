@@ -18,20 +18,112 @@ diseases simultaneously**, reflecting how medical diagnoses work in real
 clinical settings.
 
 ------------------------------------------------------------------------
+# Performance
+
+This project is remarkable, because we achieve competitive results using a lightweight setting:
+- dataset caching reducing storage from ~45GB to ~1GB
+- representative subset experiments on ~78k images in total
+- split into train / tune / test using either:
+  - official NIH split files (`USE_OFFICIAL_SPLIT=True`)
+  - or patient-level random splitting (`USE_OFFICIAL_SPLIT=False`)
+- in the benchmark runs, this resulted in an approximate 70% / 15% / 15% split
+
+## Main benchmark setup
+
+All experiments were run on the same general setup; 
+only the parameters listed in the Results table were changed between runs.
+
+Common setup:
+- `SEED = 42`
+- `use_cache = True`
+- `USE_OFFICIAL_SPLIT = True`
+- `EXCLUDED_LABELS = {"Nodule", "Mass", "Hernia"}`
+- `MAX_IMAGES = 60000`
+- `eval_frac = 0.15`
+- `NUM_LABELS = 11`
+- `THRESHOLD_TUNE_EPOCH = 1`
+- `initial_prob_threshold = 0.25`
+- `thresholds_by_disease = True`
+- `derive_negatives = True`
+- `NUM_EPOCHS = 3`
+- `BATCH_SIZE = 32`
+- `NUM_WORKERS = 2`
+- `f1_neg_threshold = 0.85`
+- `f1_pos_threshold = 0.4`
+- `delta_loss = 0.02`
+- `pretrained_model = "MultiLabelResNet"`
+- `focal_gamma = 1.2`
+- `want_save_model = False`
+
+Parameters varied between runs:
+- `lr`: `1e-4` ("fast learning") or `1e-5`
+- `train_full_model`: `True` or `False`
+- `freeze_mode_stage1`, `freeze_mode_stage2`, `unfreeze_epoch` when staged freezing was tested
+- `bce_weight`: `0.95`, `0.9`, or `0.0` (pure focal loss)
+- `pos_weight_type`
+- `update_pos_weights`
+
+In the experiments, no initial class weighting was used
+(`pos_weight_type=None`), while dynamic positive weight updates were
+optionally enabled via `update_pos_weights`.
+
+## Results on test set
+
+The following runs were compared on the same ~78k setup:
+
+| Run config | Main change                                                          | Test F1 abs | Test F1 neg | Test F1 pos | Test AUROC |
+|---|----------------------------------------------------------------------|---:|---:|---:|---:|
+| lr=`1e-4`, train_full_model=True, bce_weight=0.95, pos_weight_type=None, update_pos_weights=True | BCE+Focal mix, no staged freezing, fast learning setup               | 32% | 50.94% | 39.60% | 78% |
+| lr=`1e-4`, train_full_model=True, bce_weight=0.0, pos_weight_type=None, update_pos_weights=False | Pure Focal loss,fast learning                                        | 28% | 51.57% | 32.78% | 75% |
+| lr=`1e-5`, train_full_model=False, bce_weight=0.9, unfreeze_epoch=2, pos_weight_type=None, update_pos_weights=False | static loss,Staged freezing (`head_only → last_block`),slow learning | 25% | 53.13% | 32.23% | 75% |
+| lr=`1e-5`, train_full_model=True, bce_weight=0.9, pos_weight_type=None, update_pos_weights=False | static loss,slow learning                                            | 20% | 52.38% | 28.09% | 73% |
+
+## Interpretation
+
+- A BCE-dominant mixed loss (`bce_weight ≈ 0.95`) performs best in this short training regime.
+- Switching to pure focal loss (`bce_weight = 0`) reduces overall performance, especially on positive classes.
+- The staged freezing setup (`train_full_model=False`, unfreeze at epoch 2) underperforms in this 3-epoch setting, likely due to insufficient training time.
+- The staged freezing result is not conclusive and may improve with:
+  - more epochs  
+  - lower learning rate (e.g. `1e-5` with longer training)
+- The fine-tuning on bad labels didn't improve the AUC and F1 results and in some cases caused a 
+  worsening of around 1%. This might be due to the fact that tuning on a subset of labels 
+  damages the remaining features and should therefore be avoided.
+- Even though the ROC curves show a clear signal, it remains hard to find a threshold which 
+  gives a reliable binary decision. 
+- Further experiments are left as follow-up due to limited time and compute resources.
+Per-disease performance statistics, roc-curve plots, and sample classification are written to the `Evaluation/` directory.
+------------------------------------------------------------------------
 
 # Project Highlights
 
-This project demonstrates practical machine learning engineering skills:
+This project demonstrates a complete applied machine learning pipeline for medical imaging, with focus on robustness, efficiency, and realistic evaluation:
 
-• Significant storage size reduction of the image dataset using cached data without significant 
-performance loss\
-• Medical imaging classification using deep learning\
-• Transfer learning with pretrained CNN architectures\
-• Multi‑label classification design\
-• Patient‑level dataset splitting to avoid data leakage\
-• Class imbalance handling through configurable loss weighting and representative sampling\
-• Threshold optimization for each disease label\
-• Error‑driven model improvement through targeted fine‑tuning
+- Efficient dataset caching reducing storage from ~45GB to ~1GB, enabling fast local experimentation  
+- Efficient training (few minutes per epoch on ~50k images on a single Colab GPU,
+  depending on configuration)
+- Patient-level dataset splitting to prevent data leakage across train, tune, and test sets
+- Multi-label classification setup reflecting real clinical diagnosis scenarios  
+- Transfer learning using pretrained CNN architectures (ResNet / MobileNet)  
+- Handling of severe class imbalance through configurable sampling and loss weighting  
+- Flexible loss design combining BCE and Focal Loss  
+- Support for initializing positive class weights to emphasize rare pathologies  
+- Dynamic update of positive weights based on the model's ability to separate
+  positive and negative samples (gap-based weighting)
+- Per-label threshold optimization to improve sensitivity-specific performance  
+- Error-driven fine-tuning focused on underperforming disease labels  
+- End-to-end pipeline from data preprocessing to evaluation with medical metrics  
+
+------------------------------------------------------------------------
+# Challenges
+
+- Severe class imbalance across diseases
+- Label noise (~90% estimated accuracy)
+- Multi-label dependency between pathologies
+- Trade-off between recall and precision in medical setting
+- Although ROC curves show meaningful separation, translating this into stable
+  binary decisions remains challenging, even with per-label threshold tuning.
+- Strong limitations on computational power and time limited experiments
 
 ------------------------------------------------------------------------
 
@@ -40,6 +132,7 @@ performance loss\
 NIH_dataset_nn/
 ├── Cached_Data/
 │   └── cache_224_tot_90_jpg/
+├── Evaluation/
 ├── Information/
 │   ├── Data_Entry_2017.csv
 │   ├── train_val_list.txt
@@ -52,8 +145,8 @@ NIH_dataset_nn/
 │   ├── nihdataset.py
 │   └── performance_metrics.py
 ├── requirements.txt
+├── requirements_frozen.txt
 └── README.md
-├── Evaluation/
 ```
 ------------------------------------------------------------------------
 
@@ -199,7 +292,39 @@ The final fully connected layer is replaced to output `num_labels` logits.
 In both cases, `num_labels` is determined by the current training configuration,
 so the output size matches the labels actually used in the experiment.
 
-------------------------------------------------------------------------
+### Freezing behavior
+
+Both models implement configurable freezing through `set_trainable(freeze_mode=...)`.
+
+Supported options are:
+
+- `freeze_mode="head_only"`  
+  Freeze the full backbone and train only the classifier head.
+
+- `freeze_mode="last_block"`  
+  Train the classifier head and the last backbone block.
+
+- `freeze_mode="last_two_blocks"`  
+  Train the classifier head and the last two backbone blocks.
+
+- `freeze_mode="full"`  
+  Train the full model.
+
+The exact mapping depends on the architecture:
+
+- **ResNet**
+  - `head_only` → only `fc`
+  - `last_block` → `fc` + `layer4`
+  - `last_two_blocks` → `fc` + `layer3` + `layer4`
+
+- **MobileNet**
+  - `head_only` → only `classifier`
+  - `last_block` → `classifier` + `features[-1]`
+  - `last_two_blocks` → `classifier` + `features[-2:]`
+
+In all partial-freezing modes, the classifier head is always trainable.
+
+--------------------------------------------------------------------------
 # 5. Training Setup
 
 Training is orchestrated in `analyze_nih.py` and uses helper functions
@@ -211,15 +336,16 @@ The training script performs the following steps:
 
 1. choose device automatically (`cuda` / `mps` / `cpu`)  
 2. build the selected model (`MultiLabelResNet` or `MultiLabelMobileNet`)  
-3. prepare train and evaluation transforms  
-4. construct `NIHChestXRayDataset` with the chosen split, labels, and subset size  
-5. create `train`, `tune`, and `test` DataLoaders  
-6. define loss function and optimizer  
-7. train for `NUM_EPOCHS`  
-8. optionally tune thresholds on the tune set  
-9. optionally update loss weights during training  
-10. optionally fine-tune difficult labels  
-11. evaluate on the test set and save plots / CSV outputs  
+3. configure the training mode (full training or staged freezing)  
+4. prepare train and evaluation transforms  
+5. construct `NIHChestXRayDataset` with the chosen split, labels, and subset size  
+6. create `train`, `tune`, and `test` DataLoaders  
+7. define loss function and optimizer  
+8. train for `NUM_EPOCHS`  
+9. optionally tune thresholds on the tune set  
+10. optionally update positive loss weights during training  
+11. optionally fine-tune difficult labels  
+12. evaluate on the test set and save model, plots, and CSV outputs  
 
 Core functions involved in training:
 
@@ -229,20 +355,16 @@ Core functions involved in training:
 - `find_best_thresholds_per_label()` -- tunes one threshold per label
 - `fine_tune_bad_labels()` -- performs targeted fine-tuning on difficult labels
 
-The script supports depending on the selected configuration:
-
-- full-model training or classifier-head-only training
 ------------------------------------------------------------------------
-
-# 5a. Training Configuration Guide
+## 5a. Training Configuration
 
 The main experiment setup is defined in `analyze_nih.py`.
 
-#### Data and preprocessing
+### Data and preprocessing
 
 - `use_cache`  
   Uses cached JPEG images instead of original PNG files.  
-  - `True` → faster training, fixed image size from cache  
+  - `True` → faster training with preprocessed images  
   - `False` → loads original NIH images  
 
 - `do_rescale`  
@@ -252,7 +374,7 @@ The main experiment setup is defined in `analyze_nih.py`.
 - `MAX_IMAGES`  
   Controls dataset size by building a representative subset.  
   - smaller → faster experiments  
-  - `None` → use full available dataset  
+  - `None` → use the full available dataset  
 
 - `eval_frac`  
   Fraction used to build tune and evaluation subsets.
@@ -263,13 +385,13 @@ The main experiment setup is defined in `analyze_nih.py`.
 - `NUM_LABELS`  
   Number of active labels used after exclusion, selected from the most frequent labels.
 
-#### Split behavior
+### Split behavior
 
 - `USE_OFFICIAL_SPLIT`  
-  - `True` → uses NIH official split files  
+  - `True` → uses the NIH official split files  
   - `False` → creates patient-level random splits internally  
 
-#### Threshold behavior
+### Threshold behavior
 
 - `THRESHOLD_TUNE_EPOCH`  
   Epoch at which threshold tuning is performed.
@@ -279,13 +401,14 @@ The main experiment setup is defined in `analyze_nih.py`.
 
 - `thresholds_by_disease`  
   - `True` → optimize one threshold per label  
-  - `False` → keep the initial shared threshold  
+  - `False` → keep one shared threshold  
 
 - `derive_negatives`  
-  - `True` → assign the `Negative` label when no disease exceeds threshold  
-  - `False` → keep raw thresholded outputs only  
+  - `True` → apply consistency rules for the `Negative` label in relation to pathology 
+    predictions
+  - `False` → treat `Negative` like an independent label
 
-#### Epoch and loader settings
+### Training control
 
 - `NUM_EPOCHS`  
   Number of main training epochs.
@@ -295,9 +418,7 @@ The main experiment setup is defined in `analyze_nih.py`.
 
 - `NUM_WORKERS`  
   Number of DataLoader workers.  
-  This is increased automatically on CUDA.
-
-#### Early stopping / stopping criteria
+  This may be increased automatically on CUDA.
 
 - `f1_neg_threshold`  
   Minimum F1 target for the `Negative` class.
@@ -308,112 +429,135 @@ The main experiment setup is defined in `analyze_nih.py`.
 - `delta_loss`  
   Allowed increase above the best validation loss before stopping.
 
-#### Model and optimization
+### Model, freezing, and optimization
 
 - `pretrained_model`  
   Selects the backbone:
   - `MultiLabelResNet`
   - `MultiLabelMobileNet`
 
-- `train_full_model`  
-  - `True` → train all model parameters  
-  - `False` → train classifier head only  
+- `train_full_model`
+  - `True` → train all parameters from the beginning  
+  - `False` → apply `freeze_mode_stage1` at the start of training
 
-When `train_full_model=True`:
-- learning rate = `1e-4`
-- weight decay = `1e-4`
+- `freeze_mode_stage1`, `freeze_mode_stage2`, `unfreeze_epoch`  
+  Control staged unfreezing when partial freezing is used.
 
-When `train_full_model=False`:
-- learning rate = `1e-3`
-- weight decay = `0.0`
+The optimizer and learning rate are defined in `analyze_nih.py` and depend on
+the selected training mode and experiment. In the benchmark runs described in
+this repository, two main regimes were tested:
 
-#### Reproducibility and hardware
+- **fast learning**: `lr = 1e-4`
+- **slow learning**: `lr = 1e-5`
 
-- `SEED`  
-  Global random seed used for reproducibility.
-
-- automatic device selection  
-  The script uses:
-  - CUDA if available
-  - otherwise MPS
-  - otherwise CPU
-
-- `use_amp`  
-  Mixed precision is enabled automatically only on CUDA.
-
-### Default setup in the current script
-
-The current default configuration is:
-
-- `use_cache = True`
-- `USE_OFFICIAL_SPLIT = True`
-- `MAX_IMAGES = 2000`
-- `eval_frac = 0.15`
-- `NUM_LABELS = 11`
-- `EXCLUDED_LABELS = {"Nodule", "Mass", "Hernia"}`
-- `NUM_EPOCHS = 3`
-- `BATCH_SIZE = 32`
-- `pretrained_model = "MultiLabelResNet"`
-- `train_full_model = True`
-- `thresholds_by_disease = True`
-- `derive_negatives = True`
+For serious experiments, `MAX_IMAGES` should be at least around `30000-50000`
+to guarantee enough samples for learning each pathology. It's important to note that 
+`MAX_IMAGES` refers to the size of the train loader (70% of the total) and not to the total size of 
+the images used 
+for training, tuning and evaluation.
 ------------------------------------------------------------------------
+# 6. Loss and Class Imbalance
 
-# 6. Class Imbalance Handling
+Medical multi-label classification is strongly affected by class imbalance.
+Most images contain no findings, while some diseases are rare.
+This can cause the model to favor negative predictions and under-detect positive cases.
 
-Medical datasets are highly imbalanced. The training pipeline supports
-optional positive class weighting to reduce majority-class bias.
-This prevents the model from simply predicting the majority negative
-class.
+To address this, the training combines a mixed loss with optional positive
+class weighting.
 
-## Configuration
+## Loss configuration
 
-Class imbalance handling is controlled in `analyze_nih.py`.
+The training uses a combination of Binary Cross Entropy (BCE) and Focal Loss.
 
-### Main options
+- `bce_weight` controls the mixture:
+  - `1.0` → pure BCE
+  - `0.0` → pure Focal loss
+  - intermediate values → weighted combination
 
-- `preset_pos_weights`  
-  - `True` → computes positive class weights once from the training labels before training  
-  - `False` → uses standard `BCEWithLogitsLoss()` without class weights  
+- `focal_gamma` controls how strongly hard examples are emphasized
 
-- `update_pos_weights`  
-  - `True` → updates `pos_weight` during training based on false negative rates  
-  - `False` → keeps the original loss weighting fixed  
+In practice:
 
-### How preset weights are computed
+- BCE provides stable optimization
+- Focal loss increases the contribution of harder examples
+- the final loss is the weighted sum of BCE and Focal loss
 
-If `preset_pos_weights=True`, the script computes:
+In the benchmark experiments, a BCE-dominant mix performed better than pure
+Focal loss.
 
-- `pos = number of positives per label`
-- `N = number of training samples`
-- raw weight = `(N - pos) / pos`
-- clipped and smoothed with `log(weight) + 1`
+## Positive class weighting
 
-These weights are then passed to:
+The loss also supports positive re-weighting through `pos_weight`, which affects
+the BCE part of the loss.
 
-`BCEWithLogitsLoss(pos_weight=pos_weight)`
+### Initial weighting
 
-### Dynamic weight update during training
+Initial weights are controlled by `pos_weight_type`:
 
-If `update_pos_weights=True`, after validation the script updates the loss using:
+- `None` → no initial class weighting (`pos_weight = 1` for all labels)
+- `"sqrt_ratio"` → uses a softer version of the imbalance ratio
+- `"prefer_rarest"` → gives stronger emphasis to rarer labels
 
-- the current false negative rate per label
+If enabled, the weights are computed from the train-label frequencies and then
+clipped by `pos_weight_cap`.
 
-This makes rare or under-detected labels contribute more strongly to the loss during later epochs.
+### Dynamic weight update
 
-### Current default behavior
+If `update_pos_weights = True`, the positive weights are updated after each
+validation step.
 
-In the current script:
+This update is **not based directly on false negative rate**. Instead, for each
+label the loss computes:
 
-- `preset_pos_weights = False`
-- `update_pos_weights = False`
+- `mu_1`: the mean predicted probability on samples where the label is positive
+- `mu_0`: the mean predicted probability on samples where the label is negative
 
-So the default setup uses:
+From these, it defines a separation gap:
 
-`BCEWithLogitsLoss()`
+- `gap = mu_1 - mu_0`
 
-without additional positive weighting.
+This gap measures how well the model separates positive and negative samples for
+that label:
 
+- large gap → positives and negatives are already well separated
+- small gap → the label is still hard to distinguish
+
+The target positive weight is then increased when the gap is small:
+
+- small gap → larger `pos_weight`
+- large gap → `pos_weight` stays closer to `1`
+
+The update is smoothed with momentum, so the weights do not jump abruptly from
+one epoch to the next.
+
+Note: The dynamic positive weighting mechanism operates independently from
+the focal loss component and directly modifies the `pos_weight` used in
+`BCEWithLogitsLoss`.
+
+### Intuition
+
+This mechanism does not only look at how rare a label is in the dataset.
+Instead, it reacts to how well the model is currently separating positives from
+negatives for each label.
+
+This makes the weighting adaptive:
+
+- labels that remain poorly separated receive stronger emphasis
+- labels that are already learned well are not over-penalized
+
+So the update is driven by the model's current confidence structure, not only by
+static class frequencies.
+
+## Practical observations
+
+From the benchmark experiments:
+
+- imbalance handling might have a small positive impact on positive-class performance and 
+  hence on the positive weighting reduced F1. Due to computational and time restriction its 
+  impact was not fully verified but seemed a priori rather small (~1-2%)
+- pure Focal loss did not outperform the BCE-dominant mixed loss
+- a mixed BCE/Focal setup with adaptive weighting gave the most stable results
+  in short runs
 ------------------------------------------------------------------------
 
 # 7. Threshold Optimization
@@ -452,7 +596,7 @@ If `thresholds_by_disease=True`, the script:
 1. evaluates the model on the tune set  
 2. collects predicted probabilities and ground-truth labels  
 3. runs `find_best_thresholds_per_label()`  
-4. searches thresholds on a grid from `0.1` to `0.6`  
+4. searches thresholds on a fixed grid (e.g`0.25`-`0.7`)  
 5. chooses the threshold with the best F1 score for each label  
 
 The tuned thresholds are then used for later validation and final test evaluation.
@@ -503,30 +647,32 @@ During validation and testing:
 
 ### Negative label handling
 
-If `derive_negatives=True`:
+If `derive_negatives=True`, the `Negative` label is handled with a
+competition-based rule instead of being treated like an ordinary independent
+label.
 
-- the index of the `Negative` label is found
-- all other disease labels are checked
-- `Negative` is set to 1 only if no disease label is predicted as positive
+The prediction logic works as follows:
 
-This prevents contradictory outputs such as:
+1. all labels are first thresholded normally  
+2. the `Negative` probability is compared against:
+   - its own threshold
+   - the maximum disease probability
+   - the sum of the top disease probabilities  
+3. `Negative` is predicted only if it is strong enough relative to the disease
+   probabilities  
+4. if no disease label exceeds threshold, `Negative` is set to `1` to avoid an
+   all-zero prediction  
+5. if `Negative` is predicted, all disease labels are forced to `0`
 
-- `Negative = 1`
-- and a disease label = 1
-
-at the same time.
+This means the `Negative` label is not treated as an independent class.
+Instead, it competes with disease predictions and is also used as a fallback
+when no disease is predicted.
 
 If `derive_negatives=False`:
 
-- all labels, including `Negative`, are used only through direct thresholding
-
-### Current default behavior
-
-In the current script:
-
-- `derive_negatives = True`
-
-So the `Negative` label is derived from the absence of predicted disease labels, rather than treated as an independent thresholded disease output.
+- all labels are thresholded directly
+- if any disease label is predicted, `Negative` is forced to `0` to keep the
+  output logically consistent
 
 ------------------------------------------------------------------------
 
@@ -536,6 +682,7 @@ Metrics are computed in `performance_metrics.py`.
 
 Key metrics:
 
+-   AUROC
 -   Accuracy
 -   Precision
 -   Recall
@@ -554,11 +701,11 @@ Core functions:
 
 # 10. Error-Driven Fine-Tuning
 
-After the main training stage, the project supports an additional
-fine-tuning step focused on underperforming labels.
+After the main training stage, the project supports an optional fine-tuning step
+focused on underperforming labels.
 
-This step is designed to improve recall on difficult diseases by training
-again on samples that contain labels with high false negative rates.
+The goal is to re-train the model on samples containing labels that are currently
+hard to detect, based on their false negative rates.
 
 Function:
 
@@ -572,48 +719,77 @@ Error-driven fine-tuning is configurable in both `analyze_nih.py` and `functions
 
 - `partial_unfreeze_bad_labels`  
   Controls whether fine-tuning updates:
-  - only the classifier head
-  - or also the last backbone block
+  - only the classifier head  
+  - or also part of the backbone  
 
 - `n_epochs`  
-  Number of fine-tuning epochs
+  Number of fine-tuning epochs  
 
 - `lr`  
-  Learning rate used during fine-tuning
+  Learning rate used during fine-tuning  
 
-### How fine-tuning is triggered
+---
 
-After the main training loop, the script computes false negative rates.
+## How fine-tuning works
 
-Labels are selected for fine-tuning if:
+After the main training loop:
 
-- `fn_rate > 0.30`
+1. the model is evaluated on the validation set  
+2. the false negative rate (`fn_rate`) is computed for each label  
+3. labels with high FN rate are selected (e.g. `fn_rate > 0.30`)  
 
 Then:
 
-1. all samples containing at least one of these labels are selected  
-2. a reduced DataLoader is built  
-3. the model is fine-tuned on these labels only  
+4. all samples containing at least one of these labels are collected  
+5. a reduced dataset and DataLoader are created from these samples  
+6. the model is fine-tuned only on this subset  
 
-### Backbone behavior
+This creates a targeted training phase where the model focuses on labels it
+currently struggles to detect.
+
+---
+
+## Training behavior
+
+During fine-tuning:
+
+- a simplified loss is used (`BCEWithLogitsLoss`)  
+- an Adam optimizer is applied with a small learning rate (e.g. `1e-5`)  
+- training runs for a small number of epochs  
+
+Unlike the main training loop, this phase does not use the full loss
+configuration (e.g. no focal component or dynamic re-weighting).
+
+---
+
+## Backbone behavior
 
 Inside `fine_tune_bad_labels()`:
 
-- all parameters are frozen first
-- classifier head is always unfrozen
-- if `partial_unfreeze=True`, the last backbone block is also unfrozen:
-  - `layer4` for ResNet
-  - `features[-2:]` for MobileNet
+- all parameters are frozen first  
+- the classifier head is always unfrozen  
 
-### Current default behavior
+If `partial_unfreeze_bad_labels=True`, part of the backbone is also unfrozen:
 
-In the current script:
+- **ResNet** → `layer4`  
+- **MobileNet** → last feature blocks (`features[-2:]`)  
 
-- labels with `fn_rate > 0.30` are selected
-- `n_epochs = 2`
-- `lr = 1e-4`
-- `partial_unfreeze_bad_labels = True`
+---
 
+## Practical observations
+
+In the benchmark experiments:
+
+- labels with `fn_rate > 0.30` were selected  
+- `n_epochs = 1`  
+- `lr = 1e-5`  
+- `partial_unfreeze_bad_labels = False`  
+
+This fine-tuning step did **not improve performance** and in some cases
+slightly degraded it.
+
+A likely reason is that focusing on a subset of labels can distort previously
+learned feature representations and harm overall generalization.
 ------------------------------------------------------------------------
 
 # 11. Visualization and Output
@@ -631,6 +807,9 @@ Functions:
 -   `plot_roc_curve()`
 -   `plot_images_classification()`
 
+The models can be saved using 
+-   `save_model()`
+
 ------------------------------------------------------------------------
 
 # Installation
@@ -647,6 +826,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+A frozen dependency snapshot is also included in `requirements_frozen.txt`.
+
 ------------------------------------------------------------------------
 
 # Data Layout
@@ -654,30 +835,40 @@ pip install -r requirements.txt
 The code expects this structure:
 
 Original Data
-Data/ archive/ images_001/images/ images_002/images/
+```
+Data/archive/images_001/images
+Data/archive/images_002/images
+...
+Data/archive/images_012/images
+```
 
 Labels and splits
+```
 Information/
 ├── Data_Entry_2017.csv
 ├── train_val_list.txt
 └── test_list.txt
-
+```
 Cached Data
+```
 Cached_Data/ cache_224_tot_90_jpg/
-
+```
 ------------------------------------------------------------------------
 
 # Running the Project
 
 Build the image cache:
-
+```
 python NIH_Code/build_cache.py
+```
 
 Run training and evaluation:
-
+```
 python NIH_Code/analyze_nih.py
-
+```
 Outputs will appear in the `Evaluation/` directory.
+
+If chosen, a saved trained model will appear in the `Model/` directory.
 
 Before running the project, review the configuration section at the top of
 `NIH_Code/analyze_nih.py` to adjust dataset size, active labels, split mode,
@@ -702,6 +893,7 @@ This project demonstrates:
 -   PyTorch deep learning workflows
 -   transfer learning
 -   multi‑label classification
+  - tuning on loss function
 -   dataset engineering
 -   class imbalance handling
 -   model evaluation and metrics

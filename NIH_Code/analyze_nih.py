@@ -107,12 +107,12 @@ EXCLUDED_LABELS = {
     "Hernia",  # Only 227 examples are too few!
 }
 
-# -- Partiel unfreeze bad labels --
+# -- Partial unfreeze bad labels --
 partial_unfreeze_bad_labels = False  # Decides if to unfreeze just the head or also the
 # last backbone block of the model for fine-tuning on less performant labels
 
 # -- SUBSET SETTINGS --
-MAX_IMAGES = 6000  # Number of images to use (subset) to keep runtime manageable, this code
+MAX_IMAGES = 60000  # Number of images to use (subset) to keep runtime manageable, this code
 # chooses a representative subset, which is roughly of this size and aims to keep the proportions
 # of different pathologies in the representative subset similar to the original distribution
 # favoring thereby pathologies over negatives
@@ -128,10 +128,12 @@ THRESHOLD_TUNE_EPOCH = 1
 initial_prob_threshold = 0.25
 prob_thresholds = np.ones(NUM_LABELS) * initial_prob_threshold
 thresholds_by_disease = True  # Optimize threshold per disease to improve f1 score on tuning set
-derive_negatives = True  # The Negative label is assigned if no disease probability exceeds its threshold.
+derive_negatives = True  # The Negative label is assigned if no disease probability exceeds its
+# threshold as well as using specific rules for example when its probability is higher than the
+# sum of the two highest pathology probabilities
 
 # -- EPOCHS SETTINGS --
-NUM_EPOCHS = 2
+NUM_EPOCHS = 3
 BATCH_SIZE = 32
 NUM_WORKERS = 2
 
@@ -143,13 +145,16 @@ delta_loss = 0.02
 # -- Model --
 # pretrained_model = 'MultiLabelMobileNet'
 pretrained_model = 'MultiLabelResNet'
-train_full_model = False
+# If train_full_model is False, training starts with the classifier head only
+# and can later unfreeze the last backbone block at unfreeze_epoch.
+train_full_model = True
 freeze_mode_stage1 = "head_only"
 freeze_mode_stage2 = "last_block"
-unfreeze_epoch = 2
+unfreeze_epoch = 1
+
 
 # -- Loss function & weights --
-bce_weight = 0.85  # Allows to use a combo model of BCE and Focal loss
+bce_weight = 0.95  # Allows to use a combo model of BCE and Focal loss
 # (with focal weight = 1- bce_weight).
 # Setting the respective weight to 1-0 switches between models.
 focal_gamma = 1.2
