@@ -449,7 +449,6 @@ this repository, two main regimes were tested:
 
 - **fast learning**: `lr = 1e-4`
 - **slow learning**: `lr = 1e-5`
-
 For serious experiments, `MAX_IMAGES` should be at least around `30000-50000`
 to guarantee enough samples for learning each pathology. It's important to note that 
 `MAX_IMAGES` refers to the size of the train loader (70% of the total) and not to the total size of 
@@ -787,7 +786,6 @@ In the benchmark experiments:
 
 This fine-tuning step did **not improve performance** and in some cases
 slightly degraded it.
-
 A likely reason is that focusing on a subset of labels can distort previously
 learned feature representations and harm overall generalization.
 ------------------------------------------------------------------------
