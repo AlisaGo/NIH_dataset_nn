@@ -38,7 +38,7 @@ Functions:
 import torch
 import pandas as pd
 import numpy as np
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, precision_recall_curve, average_precision_score
 from functions import validate_one_epoch
 
 
@@ -127,6 +127,30 @@ def give_performance_metrics(tp, tn, fp, fn):
 
     return accuracy, precision, recall, f1_score
 
+def compute_average_precision_per_label(y_true, y_prob, labels):
+    """
+    Compute Average Precision (AUPRC summary) for each label.
+    Returns a DataFrame with one row per label.
+    """
+    rows = []
+
+    for i, label in enumerate(labels):
+        y_t = y_true[:, i]
+        y_p = y_prob[:, i]
+
+        # AP is undefined if no positive samples exist in y_true
+        if np.sum(y_t) == 0:
+            ap = np.nan
+        else:
+            ap = average_precision_score(y_t, y_p)
+
+        rows.append({
+            "label": label,
+            "ap": ap,
+        })
+
+    return pd.DataFrame(rows)
+
 
 def give_eval_stats(epoch, top_labels, predictions, labels, probs=None):
     """
@@ -166,6 +190,15 @@ def give_eval_stats(epoch, top_labels, predictions, labels, probs=None):
             y_score = probs[:, j].cpu().numpy()
             if np.unique(y_true).size == 2:
                 auc_j = roc_auc_score(y_true, y_score)
+
+        ap_j = np.nan
+        if probs is not None:
+            y_true = labels[:, j].cpu().numpy().astype(int)
+            y_score = probs[:, j].cpu().numpy()
+
+            if np.unique(y_true).size == 2:
+                auc_j = roc_auc_score(y_true, y_score)
+                ap_j = average_precision_score(y_true, y_score)
         # if j == neg_idx:
         #     # We say for the negative class that negative means 'Negative' = 1,
         #     # thus we invert the notation p and n for this class. This hasn't any
@@ -189,6 +222,7 @@ def give_eval_stats(epoch, top_labels, predictions, labels, probs=None):
             "recall": round(rec_j, 3),
             "f1_score": round(f1_j, 3),
             "auroc": round(float(auc_j), 3) if not np.isnan(auc_j) else np.nan,
+            "ap": round(float(ap_j), 3) if not np.isnan(ap_j) else np.nan,
         })
 
     eval_stats = pd.DataFrame.from_records(
@@ -197,7 +231,7 @@ def give_eval_stats(epoch, top_labels, predictions, labels, probs=None):
             "epoch", "label", "total_pos",
             "tp", "fp", "tn", "fn",
             "accuracy", "precision", "recall",
-            "f1_score", "auroc"
+            "f1_score", "auroc","ap"
         ]
     )
 
@@ -219,6 +253,7 @@ def give_epoch_stats(f1_neg,
     val_f1_score = round(eval_stats['f1_score'].mean(), 2)  # in [0..1]
     val_accuracy = round(eval_stats['accuracy'].mean(), 2)  # in [0..1]
     val_auroc = round(eval_stats['auroc'].mean(), 2)  # in [0..1]
+    val_ap = round(eval_stats['ap'].mean(skipna=True), 2) # in [0..1]
     # --------------------------------
     # Print Statistics
     # --------------------------------
@@ -235,9 +270,11 @@ def give_epoch_stats(f1_neg,
         f"Val F1 pos:{f1_pos * 100:.2f}%, "
         f"Val Accuracy:{val_accuracy * 100:.2f}%, "
         f"Val Auroc:{val_auroc * 100:.2f}%, "
+        f"Val AP:{val_ap * 100:.2f}%, "
+
     )
     print(f"{'━' * 15} Per-disease Stats (Epoch {epoch + 1}) {'━' * 15}")
-    print(eval_stats[["label", "total_pos", "precision", "recall", "f1_score", "auroc"]])
+    print(eval_stats[["label", "total_pos", "precision", "recall", "f1_score", "auroc", "ap"]])
     print('━' * 60)
 
     # Per-disease stats at final epoch only
@@ -252,7 +289,6 @@ def give_epoch_stats(f1_neg,
         print('━' * 60)
 
     return val_accuracy, eval_stats
-
 
 def evaluate_and_report(
         model,

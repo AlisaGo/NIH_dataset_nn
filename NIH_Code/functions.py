@@ -55,6 +55,9 @@ import matplotlib.pyplot as plt
 import torchvision.transforms as transforms
 from torch.utils.data import Subset, DataLoader
 
+from pathlib import Path
+from sklearn.metrics import precision_recall_curve, average_precision_score
+
 
 def get_data_loaders(BATCH_SIZE, NUM_WORKERS,
                      nih_dataset,
@@ -292,8 +295,8 @@ def fine_tune_bad_labels(model, train_subset, bad_label_ids, device,
 def find_best_thresholds_per_label(probs: torch.Tensor,
                                    labels: torch.Tensor,
                                    min_thr=0.25,
-                                   max_thr=0.7,
-                                   n_grid: int = 40):
+                                   max_thr=0.8,
+                                   n_grid: int = 80):
     """
     probs:  [N, L] float in [0,1]
     train_labels: [N, L] {0,1}
@@ -602,6 +605,84 @@ def plot_images_classification(model,
     fig.savefig(plt_savepath, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
+def plot_precision_recall_curves(y_true, y_prob, label_names, eval_dir=None, name = ''):
+    """
+    Plot Precision-Recall curves for all labels in a single figure.
+    """
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    for i, label in enumerate(label_names):
+        y_t = y_true[:, i]
+        y_p = y_prob[:, i]
+
+        if np.sum(y_t) == 0:
+            continue
+
+        precision, recall, _ = precision_recall_curve(y_t, y_p)
+        ap = average_precision_score(y_t, y_p)
+
+        ax.plot(recall, precision, label=f"{label} (AP={ap:.2f})")
+
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_title("Precision-Recall Curves")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    plt_savepath = os.path.join(eval_dir, f"pc_nih{name}.png")
+    fig.savefig(plt_savepath)
+    print("Saving PC Curves to \n", os.path.abspath(plt_savepath))
+    plt.close(fig)
+
+    return fig
+
+
+def plot_probability_distributions(y_true, y_prob, label_names, bins=40, eval_dir=None, name = ''):
+    """
+    Plot probability distributions (pos vs neg) for all labels in a grid.
+    """
+    n_labels = len(label_names)
+    n_cols = int(np.ceil(np.sqrt(n_labels)))
+    n_rows = int(np.ceil(n_labels / n_cols))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3 * n_rows))
+
+    axes = np.array(axes).reshape(-1)
+
+    for i, label in enumerate(label_names):
+        ax = axes[i]
+
+        y_t = y_true[:, i]
+        y_p = y_prob[:, i]
+
+        pos_scores = y_p[y_t == 1]
+        neg_scores = y_p[y_t == 0]
+
+        ax.hist(neg_scores, bins=bins, alpha=0.6, label="Neg", density=True)
+        ax.hist(pos_scores, bins=bins, alpha=0.6, label="Pos", density=True)
+
+        ax.set_title(label)
+        ax.set_xlabel("Prob")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.3)
+
+    # Hide unused subplots
+    for j in range(i + 1, len(axes)):
+        axes[j].axis("off")
+
+    # Shared legend (cleaner)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper right")
+
+    fig.suptitle("Probability Distributions (Pos vs Neg)", fontsize=14)
+    plt.tight_layout()
+
+    plt_savepath = os.path.join(eval_dir, f"prob_distr_nih{name}.png")
+    fig.savefig(plt_savepath)
+    print("Saving Prob Distr Curves to \n", os.path.abspath(plt_savepath))
+    plt.close(fig)
+    return fig
+
 
 def save_and_plot(results, eval_dir, top_labels, my_model, test_loader, device,
                   prob_thresholds, mean, std, derive_negatives, name=''):
@@ -616,13 +697,33 @@ def save_and_plot(results, eval_dir, top_labels, my_model, test_loader, device,
     print('Plotting roc curves')
     plot_roc_curve(all_probs, all_labels, top_labels, eval_dir, name)
 
+    y_true = all_labels.detach().cpu().numpy().astype(int)
+    y_prob = all_probs.detach().cpu().numpy()
+
+    plot_precision_recall_curves(
+        y_true=y_true,
+        y_prob=y_prob,
+        label_names=top_labels,
+        eval_dir = eval_dir,
+        name = name,
+    )
+
+    plot_probability_distributions(
+        y_true=y_true,
+        y_prob=y_prob,
+        label_names=top_labels,
+        eval_dir=eval_dir,
+        name=name,
+    )
+
     print('Plotting image samples')
     plot_images_classification(my_model, test_loader, device, top_labels, thr_tensor, mean, std,
                                eval_dir, derive_negatives, name)
 
 
-import random
 
+
+import random
 
 def set_global_seed(seed: int = 42) -> None:
     random.seed(seed)

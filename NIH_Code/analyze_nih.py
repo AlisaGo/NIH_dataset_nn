@@ -47,7 +47,7 @@ import time
 import copy
 import numpy as np
 import torch
-import torch.nn as nn
+
 from models import (
     MultiLabelMobileNet, MultiLabelResNet
 )
@@ -101,10 +101,21 @@ TRAIN_VAL_LIST = BASE_DIR / "Information" / "train_val_list.txt"
 TEST_LIST = BASE_DIR / "Information" / "test_list.txt"
 
 # # -- Exclude Labels --
+# Original experiments
+# EXCLUDED_LABELS = {
+#     "Nodule",  # Small-object difficulty, exclude due to resolution 1024 -> 320 or 224
+#     "Mass",  # difficult to detect, due to large within-class appearance variation
+#     "Hernia",  # Only 227 examples are too few!
+# }
+
 EXCLUDED_LABELS = {
-    "Nodule",  # Small-object difficulty, exclude due to resolution 1024 -> 320 or 224
-    "Mass",  # difficult to detect, due to large within-class appearance variation
-    "Hernia",  # Only 227 examples are too few!
+    "Infiltration",  # Non-specific label with high ambiguity
+    "Pleural_Thickening",  # Subtle peripheral changes, weak signal
+    "Fibrosis",  # Fine structural patterns, easily confused
+    "Pneumothorax",  # Requires detecting fine pleural lines, often not visible at low resolution
+    "Nodule",  # Small-object detection, heavily affected by resizing
+    "Consolidation",  # Strong overlap with edema and pneumonia
+    "Pneumonia",  # Heterogeneous appearance, overlaps with consolidation
 }
 
 # -- Partial unfreeze bad labels --
@@ -124,7 +135,7 @@ NUM_LABELS = 11  # Use only this number of labels, choosing the most frequent in
 NUM_LABELS = min(NUM_LABELS_ALL - len(EXCLUDED_LABELS), NUM_LABELS)
 
 # Prob thresholds for prediction
-THRESHOLD_TUNE_EPOCH = 1
+THRESHOLD_TUNE_EPOCHS = [1,3]
 initial_prob_threshold = 0.25
 prob_thresholds = np.ones(NUM_LABELS) * initial_prob_threshold
 thresholds_by_disease = True  # Optimize threshold per disease to improve f1 score on tuning set
@@ -133,7 +144,7 @@ derive_negatives = True  # The Negative label is assigned if no disease probabil
 # sum of the two highest pathology probabilities
 
 # -- EPOCHS SETTINGS --
-NUM_EPOCHS = 3
+NUM_EPOCHS = 5
 BATCH_SIZE = 32
 NUM_WORKERS = 2
 
@@ -356,7 +367,7 @@ if __name__ == "__main__":
         my_model, train_loss_avg = train_one_epoch(my_model, criterion, optimizer, train_loader,
                                                    device, scaler, use_amp)
 
-        if epoch == THRESHOLD_TUNE_EPOCH:
+        if epoch in THRESHOLD_TUNE_EPOCHS or epoch == NUM_EPOCHS - 1:
 
             # Probability Threshold tuning
             # =========================
@@ -371,7 +382,7 @@ if __name__ == "__main__":
                                          use_amp)
 
                 prob_thresholds = find_best_thresholds_per_label(probs=all_probs, labels=all_labels,
-                                                                 n_grid=40)
+                                                                 n_grid=80)
 
                 for label, thr in zip(top_labels, prob_thresholds):
                     print(f"{label}: {thr:.3f}")
@@ -479,7 +490,7 @@ if __name__ == "__main__":
 
             prob_thresholds_wft_raw = find_best_thresholds_per_label(probs=all_probs,
                                                                      labels=all_labels,
-                                                                     n_grid=40)
+                                                                     n_grid=80)
 
             alpha_thr = 0.7  # more weight to standard thresholds
             prob_thresholds_wft = prob_thresholds.copy()
@@ -549,7 +560,7 @@ if __name__ == "__main__":
     print('Saving statistics')
 
     start1 = time.perf_counter()
-    eval_dir = os.path.join(".", "Evaluation")
+    eval_dir = os.path.join("..", "Evaluation")
     os.makedirs(eval_dir, exist_ok=True)
 
     save_and_plot(standard_results, eval_dir, top_labels, my_model, test_loader, device,

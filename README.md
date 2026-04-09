@@ -94,6 +94,95 @@ The following runs were compared on the same ~78k setup:
 - Further experiments are left as follow-up due to limited time and compute resources.
 Per-disease performance statistics, roc-curve plots, and sample classification are written to the `Evaluation/` directory.
 ------------------------------------------------------------------------
+## Per-Disease Performance
+
+For the best-performing setup, we analyze the per-disease performance.
+
+**Configuration:** BCE + Focal loss mix, no staged freezing, fast learning setup with the following parameters:
+```
+lr=`1e-4`, train_full_model=True, bce_weight=0.95, pos_weight_type=None, update_pos_weights=True 
+```
+During epoch 2, probability thresholds were optimized independently for each disease by maximizing the F1 score.
+
+We also experimented with re-optimizing thresholds at every epoch. However, this did not yield any noticeable improvement. The reason for this becomes clear when analyzing the final performance statistics.
+```
+━━━━━━━━━━━━━━━ Optimize Probability Thresholds ━━━━━━━━━━━━━━━
+Validation time (s): 25.5
+Negative: 0.500
+Infiltration: 0.296
+Effusion: 0.354
+Atelectasis: 0.261
+Pneumothorax: 0.261
+Consolidation: 0.250
+Pleural_Thickening: 0.250
+Cardiomegaly: 0.481
+Emphysema: 0.273
+Edema: 0.308
+Fibrosis: 0.261
+```
+```
+━━━━━━━━━━━━━━━ Epoch Evaluation ━━━━━━━━━━━━━━━
+Epoch:3, Train Loss:0.24, Val Loss:0.32, Val F1 abs:32.00%,  Val F1 neg:50.94%,  Val F1 pos:39.60%, Val Accuracy:85.00%, Val Auroc:78.00%,
+━━━━━━━━━━━━━━━ Per-disease Stats (Epoch 3) ━━━━━━━━━━━━━━━
+                 label  total_pos  precision  recall  f1_score  auroc
+0             Negative     3326.0      0.596   0.445     0.509  0.696
+1         Infiltration     2372.0      0.369   0.669     0.475  0.671
+2             Effusion     1749.0      0.439   0.615     0.512  0.798
+3          Atelectasis     1245.0      0.303   0.587     0.400  0.761
+4         Pneumothorax     1175.0      0.536   0.346     0.420  0.820
+5        Consolidation      734.0      0.234   0.143     0.178  0.699
+6   Pleural_Thickening      400.0      0.146   0.110     0.126  0.751
+7         Cardiomegaly      351.0      0.472   0.265     0.339  0.867
+8            Emphysema      448.0      0.421   0.440     0.430  0.881
+9                Edema      333.0      0.216   0.135     0.166  0.818
+10            Fibrosis      191.0      0.000   0.000     0.000  0.785
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━ Detailed Per-disease Stats (Epoch 3) ━━━━━━━━━━━━━━━
+                 label  total_pos      tp      fp      tn      fn  f1_score  
+0             Negative     3326.0  1480.0  1005.0  4685.0  1846.0     0.509
+1         Infiltration     2372.0  1586.0  2715.0  3929.0   786.0     0.475
+2             Effusion     1749.0  1076.0  1375.0  5892.0   673.0     0.512
+3          Atelectasis     1245.0   731.0  1679.0  6092.0   514.0     0.400
+4         Pneumothorax     1175.0   406.0   352.0  7489.0   769.0     0.420
+5        Consolidation      734.0   105.0   344.0  7938.0   629.0     0.178
+6   Pleural_Thickening      400.0    44.0   257.0  8359.0   356.0     0.126
+7         Cardiomegaly      351.0    93.0   104.0  8561.0   258.0     0.339
+8            Emphysema      448.0   197.0   271.0  8297.0   251.0     0.430
+9                Edema      333.0    45.0   163.0  8520.0   288.0     0.166
+10            Fibrosis      191.0     0.0     1.0  8824.0   191.0     0.000
+
+```
+
+### Main Insights
+
+Although the AUROC values indicate a meaningful signal, translating this into reliable binary decisions remains difficult, as reflected by low precision and recall.
+
+AUROC measures performance across all thresholds using:
+- TPR (recall) = TP / (TP + FN)
+- FPR = FP / (FP + TN)
+
+In this multi-label setting, each pathology is evaluated independently. Due to strong class imbalance, the number of true negatives is much larger than the number of false positives. As a result, FPR can remain low even when the absolute number of false positives is relatively high.
+
+This effect can be illustrated using Edema:
+
+At the chosen threshold:
+- TP = 45, FN = 288 → Recall ≈ 0.135
+- FP = 163, TN = 8520 → FPR ≈ 0.019
+Here it becomes clear that its impossible to find a threshold which separates cleanly positives 
+and negatives, as we see that we have a high FN and a high FP rate.
+
+Now lets assume that with a lower threshold we would get:
+- TP ≈ 300, FN ≈ 33 → Recall ≈ 0.90
+- FP ≈ 800, TN ≈ 7700 → FPR ≈ 0.094
+
+While recall improves significantly, precision becomes poor:
+- Precision ≈ 300 / (300 + 800) ≈ 0.27
+
+This shows that even when many false positives are introduced, FPR remains moderate because it is normalized by the large number of negatives. Consequently, the ROC curve can still achieve high TPR at relatively low FPR, resulting in a good AUROC.
+
+**Conclusion:**  
+The model captures a useful ranking signal (high AUROC), but due to class imbalance and overlapping score distributions, no threshold yields both high precision and high recall.
 
 # Project Highlights
 
@@ -117,14 +206,66 @@ This project demonstrates a complete applied machine learning pipeline for medic
 ------------------------------------------------------------------------
 # Challenges
 
-- Severe class imbalance across diseases
-- Label noise (~90% estimated accuracy)
-- Multi-label dependency between pathologies
-- Trade-off between recall and precision in medical setting
-- Although ROC curves show meaningful separation, translating this into stable
-  binary decisions remains challenging, even with per-label threshold tuning.
-- Strong limitations on computational power and time limited experiments
+- Severe class imbalance across diseases  
+- Strong variability in image quality and exposure  
+- Mixing of PA and portable AP X-ray images  
+- AP images are problematic for Cardiomegaly and often contain artifacts (e.g., cables, medical devices)  
+- Label noise (~90% estimated accuracy)  
+- Multi-label dependencies between pathologies  
+- Trade-off between recall and precision in a medical setting  
+- Although ROC curves show meaningful separation, translating this into stable binary decisions remains challenging, even with per-label threshold tuning  
+- Limited computational resources and time-constrained experiments  
+------------------------------------------------------------------------
 
+## Pathology Difficulty (Qualitative Assessment)
+
+- **Effusion** — Easy–Moderate  
+  Fluid accumulation creates visible opacity at lung bases.
+
+- **Edema** — Moderate  
+  Diffuse opacities; visible but overlaps with other conditions.
+
+- **Emphysema** — Moderate  
+  Global hyperinflation and diaphragm flattening; relatively consistent but not always clear.
+
+- **Hernia** — Moderate  
+  Rare but visually distinct (air bubble or abdominal content in thorax).
+
+- **Mass** — Moderate–Difficult  
+  Larger than nodules but still variable and sometimes subtle.
+
+- **Atelectasis** — Moderate–Difficult  
+  Local density changes; often subtle and position-dependent.
+
+- **Cardiomegaly** — Moderate–Difficult  
+  Strongly dependent on projection (AP vs PA); easily confounded.
+
+- **Consolidation** — Difficult  
+  Patchy opacities; overlaps visually with edema and pneumonia.
+
+- **Pneumonia** — Difficult  
+  Heterogeneous opacities; air bronchograms often hard to recognize.
+
+- **Pleural_Thickening** — Difficult  
+  Subtle peripheral changes; weak visual signal.
+
+- **Fibrosis** — Difficult  
+  Fine structural changes; easily confused with other patterns.
+
+- **Infiltration** — Difficult  
+  Non-specific label including a wide range of abnormalities.
+
+- **Nodule** — Very Difficult  
+  Small localized structures; often lost after resizing.
+
+- **Pneumothorax** — Very Difficult  
+  Requires detecting fine pleural lines; often not visible at low resolution.
+
+**Sample images (original resolution: 1024×1024) for Effusion and Pneumothorax**
+<p float="left">
+  <img src="pathology_samples/Effusion.png" width="45%" />
+  <img src="pathology_samples/Pneumothorax.png" width="45%" />
+</p>
 ------------------------------------------------------------------------
 
 # Repository Structure
@@ -806,6 +947,16 @@ Functions:
 
 The models can be saved using 
 -   `save_model()`
+
+### Pathology Sample Grids
+
+The repository also includes a utility to generate image grids for each pathology from the NIH dataset metadata.
+
+The grid selection prefers **pure samples** (images containing only the requested label) and falls back to **mixed samples** when necessary. This makes it easier to visually inspect the typical appearance of each pathology and to assess image and label quality.
+
+Example output files can be stored in:
+``` id="n8ij4s"
+pathology_samples/
 
 ------------------------------------------------------------------------
 
