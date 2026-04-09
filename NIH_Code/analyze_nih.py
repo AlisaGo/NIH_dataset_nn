@@ -109,13 +109,17 @@ TEST_LIST = BASE_DIR / "Information" / "test_list.txt"
 # }
 
 EXCLUDED_LABELS = {
-    "Infiltration",  # Non-specific label with high ambiguity
-    "Pleural_Thickening",  # Subtle peripheral changes, weak signal
-    "Fibrosis",  # Fine structural patterns, easily confused
-    "Pneumothorax",  # Requires detecting fine pleural lines, often not visible at low resolution
-    "Nodule",  # Small-object detection, heavily affected by resizing
-    "Consolidation",  # Strong overlap with edema and pneumonia
-    "Pneumonia",  # Heterogeneous appearance, overlaps with consolidation
+    "Infiltration",       # Non-specific label with high ambiguity
+    "Pleural_Thickening", # Subtle peripheral changes, weak signal
+    "Fibrosis",           # Fine structural patterns, easily confused
+    "Pneumothorax",       # Requires detecting fine pleural lines, often not visible at low resolution
+    "Nodule",             # Small-object detection, heavily affected by resizing
+    "Consolidation",      # Strong overlap with edema and pneumonia
+    "Pneumonia",          # Heterogeneous appearance, overlaps with consolidation
+    "Mass",               # Heterogeneous appearance
+    "Cardiomegaly",       # Projection-dependent; AP images are problematic
+    "Emphysema",          # Easily confused
+    "Hernia",             # Too rare for stable training/evaluation
 }
 
 # -- Partial unfreeze bad labels --
@@ -128,7 +132,7 @@ MAX_IMAGES = 50000  # Number of images to use (subset) to keep runtime manageabl
 # of different pathologies in the representative subset similar to the original distribution
 # favoring thereby pathologies over negatives
 eval_frac = 0.15  # Wrt. max_images
-NUM_LABELS_ALL = 14
+NUM_LABELS_ALL = 15
 NUM_LABELS = 11  # Use only this number of labels, choosing the most frequent in descending
 # order
 
@@ -144,14 +148,14 @@ derive_negatives = True  # The Negative label is assigned if no disease probabil
 # sum of the two highest pathology probabilities
 
 # -- EPOCHS SETTINGS --
-NUM_EPOCHS = 5
+NUM_EPOCHS = 6
 BATCH_SIZE = 32
 NUM_WORKERS = 2
 
 # -- Stopping criteria  --
 f1_neg_threshold = 0.85
 f1_pos_threshold = 0.4
-delta_loss = 0.02
+delta_loss = 0.05
 
 # -- Model --
 # pretrained_model = 'MultiLabelMobileNet'
@@ -312,7 +316,7 @@ if __name__ == "__main__":
     )
 
     if train_full_model:
-        lr = 1e-5
+        lr = 5e-5
         weight_decay = 1e-4
         my_model.set_trainable("full")
     else:
@@ -339,6 +343,7 @@ if __name__ == "__main__":
     #############################################
     val_loss_min = float("inf")
     early_stopping = False
+    best_f1_pos = -1.0
 
     for epoch in range(NUM_EPOCHS):
         print('━' * 60)
@@ -431,13 +436,14 @@ if __name__ == "__main__":
                       f"threshold f1 neg {f1_neg} over {f1_neg_threshold} "
                       f"and f1 pos {f1_pos} over {f1_pos_threshold}.")
 
-            if val_loss_avg > val_loss_min + delta_loss:
+            if val_loss_avg > val_loss_min + delta_loss and f1_pos < best_f1_pos - 0.5*delta_loss:
                 early_stopping = True
                 print(
                     f"Early stop at epoch {epoch + 1} because this epochs loss {val_loss_avg} "
                     f"compared to the minimal loss in the previous epochs {val_loss_min}.")
             else:
                 val_loss_min = min(val_loss_avg, val_loss_min)
+                best_f1_pos = max(f1_pos, best_f1_pos)
 
             # print(f"{'━' * 15} Statistics on Tune Set {'━' * 15}")
             # val_accuracy, eval_stats = give_epoch_stats(f1_neg, f1_pos, NUM_EPOCHS, epoch,

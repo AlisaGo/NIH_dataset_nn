@@ -55,7 +55,6 @@ import matplotlib.pyplot as plt
 import torchvision.transforms as transforms
 from torch.utils.data import Subset, DataLoader
 
-from pathlib import Path
 from sklearn.metrics import precision_recall_curve, average_precision_score
 
 
@@ -294,8 +293,8 @@ def fine_tune_bad_labels(model, train_subset, bad_label_ids, device,
 
 def find_best_thresholds_per_label(probs: torch.Tensor,
                                    labels: torch.Tensor,
-                                   min_thr=0.25,
-                                   max_thr=0.8,
+                                   min_thr=0.15,
+                                   max_thr=0.85,
                                    n_grid: int = 80):
     """
     probs:  [N, L] float in [0,1]
