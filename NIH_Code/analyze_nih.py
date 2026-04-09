@@ -123,7 +123,7 @@ partial_unfreeze_bad_labels = False  # Decides if to unfreeze just the head or a
 # last backbone block of the model for fine-tuning on less performant labels
 
 # -- SUBSET SETTINGS --
-MAX_IMAGES = 60000  # Number of images to use (subset) to keep runtime manageable, this code
+MAX_IMAGES = 50000  # Number of images to use (subset) to keep runtime manageable, this code
 # chooses a representative subset, which is roughly of this size and aims to keep the proportions
 # of different pathologies in the representative subset similar to the original distribution
 # favoring thereby pathologies over negatives
@@ -206,7 +206,7 @@ if __name__ == "__main__":
 
     if device.type == "cuda":
         pin_memory = True
-        NUM_WORKERS = 4
+        NUM_WORKERS = 2
     else:
         pin_memory = False
 

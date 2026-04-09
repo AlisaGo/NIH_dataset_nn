@@ -149,30 +149,44 @@ class NIHChestXRayDataset(Dataset):
                 test_df = self.data_df.iloc[test_idx]
             else:
                 train_df = self.data_df
-            train_df, remaining_df = self.build_representative_subset(xray_df=train_df,
-                                                                      max_size=self.max_size, )
-            eval_target = int(self.max_size * self.eval_frac)
+            eval_target = int(round(self.max_size * self.eval_frac))
 
-            tune_df, remaining_df = self.build_representative_subset(xray_df=remaining_df,
-                                                                     max_size=eval_target, )
+            train_pool_df, _ = self.build_representative_subset(
+                xray_df=train_df,
+                max_size=self.max_size,
+            )
+
+            train_df, tune_df = self.split_train_tune_subset(
+                train_pool_df,
+                tune_frac=self.eval_frac,
+                seed=self.random_seed,
+                min_pos_per_label=5,
+            )
+
+            print("Train subset label sums:")
+            print(train_df[list(self.top_labels)].sum())
+
+            print("Tune subset label sums:")
+            print(tune_df[list(self.top_labels)].sum())
+
             if use_official_split:
                 test_df, _ = self.build_representative_subset(xray_df=test_df,
                                                               max_size=eval_target)
-            else:
-                test_df, _ = self.build_representative_subset(xray_df=remaining_df,
-                                                              max_size=eval_target)
 
-            self.data_df = pd.concat(
-                [
-                    train_df.assign(split="train"),
-                    tune_df.assign(split="tune"),
-                    test_df.assign(split="test"),
-                ],
-                ignore_index=True
-            )
-            self.train_idx = self.data_df.index[self.data_df["split"] == "train"].to_numpy()
-            self.tune_idx = self.data_df.index[self.data_df["split"] == "tune"].to_numpy()
-            self.test_idx = self.data_df.index[self.data_df["split"] == "test"].to_numpy()
+                self.data_df = pd.concat(
+                    [
+                        train_df.assign(split="train"),
+                        tune_df.assign(split="tune"),
+                        test_df.assign(split="test"),
+                    ],
+                    ignore_index=True
+                )
+                self.train_idx = self.data_df.index[self.data_df["split"] == "train"].to_numpy()
+                self.tune_idx = self.data_df.index[self.data_df["split"] == "tune"].to_numpy()
+                self.test_idx = self.data_df.index[self.data_df["split"] == "test"].to_numpy()
+            else:
+                self.data_df = train_pool_df.copy()
+                self.make_train_tune_val_split()
         else:
             self.make_train_tune_val_split()
 
@@ -189,6 +203,81 @@ class NIHChestXRayDataset(Dataset):
             )
             for row in df_samples.itertuples(index=False, name=None)
         ]
+
+    def split_train_tune_subset(self, xray_df, tune_frac=0.15, seed=42, min_pos_per_label=10):
+        """
+        Split an already constructed representative train subset into
+        train and tune parts patient-wise.
+
+        Goals:
+        - no patient leakage
+        - approximate tune fraction
+        - ensure at least a minimum number of positive samples per label in tune
+        """
+        top_labels = list(self.top_labels)
+        rng = np.random.default_rng(seed)
+
+        # patient-level label table
+        patient_df = xray_df.groupby("Patient ID")[top_labels].max()
+
+        all_patient_ids = patient_df.index.to_numpy()
+        rng.shuffle(all_patient_ids)
+
+        tune_patients = set()
+
+        # ---- Stage 1: guarantee minimum positives per label in tune ----
+        for label in top_labels:
+            if label == "Negative":
+                continue
+
+            current_tune_df = xray_df[xray_df["Patient ID"].isin(tune_patients)]
+            current_pos = int(current_tune_df[label].sum()) if len(current_tune_df) > 0 else 0
+
+            max_possible = int(xray_df[label].sum())
+            target_pos = min(min_pos_per_label, max_possible)
+
+            if current_pos >= target_pos:
+                continue
+
+            candidate_pids = patient_df.index[
+                (patient_df[label] == 1) & (~patient_df.index.isin(tune_patients))
+                ].to_numpy()
+
+            rng.shuffle(candidate_pids)
+
+            for pid in candidate_pids:
+                tune_patients.add(pid)
+                current_tune_df = xray_df[xray_df["Patient ID"].isin(tune_patients)]
+                current_pos = int(current_tune_df[label].sum())
+                if current_pos >= target_pos:
+                    break
+
+        # ---- Stage 2: fill up to target tune size ----
+        n_target = int(round(len(patient_df) * tune_frac))
+        n_target = max(1, n_target)
+        n_target = max(n_target, len(tune_patients))
+
+        # rarity score: patients carrying rarer labels are prioritized
+        label_counts = patient_df.sum(axis=0).astype(float)
+        inv_freq = 1.0 / np.maximum(label_counts, 1.0)
+        rarity_score = patient_df.mul(inv_freq, axis=1).sum(axis=1)
+
+        remaining_pids = [pid for pid in all_patient_ids if pid not in tune_patients]
+        remaining_pids = sorted(
+            remaining_pids,
+            key=lambda pid: rarity_score.loc[pid],
+            reverse=True
+        )
+
+        for pid in remaining_pids:
+            if len(tune_patients) >= n_target:
+                break
+            tune_patients.add(pid)
+
+        tune_df = xray_df[xray_df["Patient ID"].isin(tune_patients)].copy()
+        train_df = xray_df[~xray_df["Patient ID"].isin(tune_patients)].copy()
+
+        return train_df, tune_df
 
     def __len__(self):
         return len(self.samples)
@@ -461,7 +550,7 @@ class NIHChestXRayDataset(Dataset):
 
         top_x = self.top_x
         top_labels = self.top_labels
-        label_counts_sorted = self.label_distribution
+        label_counts_sorted = xray_df[top_labels].sum(axis=0).astype(int)
 
         # If there are twice as many negatives as the most common illness, set the fraction of
         # negatives to be twice as big as the fraction of the most common illness
@@ -503,7 +592,10 @@ class NIHChestXRayDataset(Dataset):
         remaining_df = filtered_df.copy()
         frames = []
 
-        for i, label in reversed(list(enumerate(top_labels))):
+        sample_order = list(label_counts_sorted.sort_values(ascending=True).index)
+
+        for label in sample_order:
+            i = list(top_labels).index(label)
             subset_df = remaining_df[remaining_df[label] == 1]
             n_samples = min(scaled_counts[i], len(subset_df))
 
