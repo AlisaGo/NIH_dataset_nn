@@ -909,7 +909,6 @@ Core functions:
 -   `give_performance_metrics()`
 -   `compute_fn_fp_rate()`
 -   `compute_weighted_f1()`
--   `compute_average_precision_per_label()`
 
 ------------------------------------------------------------------------
 

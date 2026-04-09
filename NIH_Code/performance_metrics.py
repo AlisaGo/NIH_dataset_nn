@@ -127,31 +127,6 @@ def give_performance_metrics(tp, tn, fp, fn):
 
     return accuracy, precision, recall, f1_score
 
-def compute_average_precision_per_label(y_true, y_prob, labels):
-    """
-    Compute Average Precision (AUPRC summary) for each label.
-    Returns a DataFrame with one row per label.
-    """
-    rows = []
-
-    for i, label in enumerate(labels):
-        y_t = y_true[:, i]
-        y_p = y_prob[:, i]
-
-        # AP is undefined if no positive samples exist in y_true
-        if np.sum(y_t) == 0:
-            ap = np.nan
-        else:
-            ap = average_precision_score(y_t, y_p)
-
-        rows.append({
-            "label": label,
-            "ap": ap,
-        })
-
-    return pd.DataFrame(rows)
-
-
 def give_eval_stats(epoch, top_labels, predictions, labels, probs=None):
     """
     Build a pandas DataFrame of per-label stats for logging or analysis.
