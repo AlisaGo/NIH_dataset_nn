@@ -41,7 +41,7 @@ Common setup:
 - `MAX_IMAGES = 60000`
 - `eval_frac = 0.15`
 - `NUM_LABELS = 11`
-- `THRESHOLD_TUNE_EPOCH = 1`
+- `THRESHOLD_TUNE_EPOCHS = [1]`
 - `initial_prob_threshold = 0.25`
 - `thresholds_by_disease = True`
 - `derive_negatives = True`
@@ -90,9 +90,7 @@ The following runs were compared on the same ~78k setup:
   worsening of around 1%. This might be due to the fact that tuning on a subset of labels 
   damages the remaining features and should therefore be avoided.
 - Even though the ROC curves show a clear signal, it remains hard to find a threshold which 
-  gives a reliable binary decision. 
-- Further experiments are left as follow-up due to limited time and compute resources.
-Per-disease performance statistics, roc-curve plots, and sample classification are written to the `Evaluation/` directory.
+  gives a reliable binary decision.
 ------------------------------------------------------------------------
 ## Per-Disease Performance
 
@@ -168,40 +166,115 @@ This effect can be illustrated using Edema:
 
 At the chosen threshold:
 - TP = 45, FN = 288 → Recall ≈ 0.135
-- FP = 163, TN = 8520 → FPR ≈ 0.019
+- FP = 163 
 Here it becomes clear that its impossible to find a threshold which separates cleanly positives 
-and negatives, as we see that we have a high FN and a high FP rate.
+and negatives, as at the current threshold we have a high FN and a high FP rate.
 
-Now lets assume that with a lower threshold we would get:
+Now let's assume that with a lower threshold we would get:
 - TP ≈ 300, FN ≈ 33 → Recall ≈ 0.90
 - FP ≈ 800, TN ≈ 7700 → FPR ≈ 0.094
 
 While recall improves significantly, precision becomes poor:
 - Precision ≈ 300 / (300 + 800) ≈ 0.27
 
-This shows that even when many false positives are introduced, FPR remains moderate because it is normalized by the large number of negatives. Consequently, the ROC curve can still achieve high TPR at relatively low FPR, resulting in a good AUROC.
+This shows that even when many false positives are introduced, FPR remains moderate because it is normalized by the large number of negatives. 
+Consequently, the ROC curve can still achieve high TPR at relatively low FPR, resulting in a good AUROC.
 
 **Conclusion:**  
 The model captures a useful ranking signal (high AUROC), but due to class imbalance and overlapping score distributions, no threshold yields both high precision and high recall.
+**Probability distribution for selected pathologies**
+<p float="left">
+  <img src="pathology_samples/prob_distr_nih_std.png" width="80%" />
+</p>
+
+## Reduced Label Setup and Longer Training
+
+To better understand the limits of the model, we conducted an additional experiment on a reduced set of the most visually consistent pathologies:
+
+- Effusion  
+- Atelectasis  
+- Edema  
+
+This setup focuses on labels with broader and more stable visual patterns compared to highly ambiguous or small-scale pathologies.
+
+### Configuration
+
+- ~50k training samples (representative subset)  
+- patient-level split with a dedicated tune set  
+- 6 training epochs  
+- learning rate: `5e-5`  
+- BCE + Focal loss (same setup as main experiments)  
+- additional evaluation using **Average Precision (AP)**  
+
+AP summarizes the Precision–Recall curve and is more informative than AUROC under strong class imbalance, since it directly reflects the trade-off between precision and recall.
+
+---
+
+### Results
+```
+━━━━━━━━━━━━━━━ Epoch Evaluation ━━━━━━━━━━━━━━━
+Epoch:6, Train Loss:0.31, Val Loss:0.59, Val F1 abs:49.00%,  
+Val F1 neg:63.61%,  Val F1 pos:51.29%, Val Accuracy:70.00%, Val Auroc:78.00%, Val AP:50.00%, 
+━━━━━━━━━━━━━━━ Per-disease Stats (Epoch 6) ━━━━━━━━━━━━━━━
+         label  total_pos  precision  recall  f1_score  auroc     ap
+0     Negative     3965.0      0.778   0.538     0.636  0.762  0.786
+1     Effusion     2251.0      0.572   0.674     0.619  0.805  0.627
+2  Atelectasis     1584.0      0.296   0.765     0.427  0.709  0.387
+3        Edema      410.0      0.164   0.671     0.264  0.827  0.211
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━ Detailed Per-disease Stats (Epoch 6) ━━━━━━━━━━━━━━━
+         label  total_pos      tp      fp      tn      fn  f1_score  auroc
+0     Negative     3965.0  2133.0   609.0  2942.0  1832.0     0.636  0.762
+1     Effusion     2251.0  1518.0  1138.0  4127.0   733.0     0.619  0.805
+2  Atelectasis     1584.0  1212.0  2881.0  3051.0   372.0     0.427  0.709
+3        Edema      410.0   275.0  1402.0  5704.0   135.0     0.264  0.827
+```
+
+---
+
+### Interpretation
+
+- **Effusion** shows balanced performance, with both reasonable precision and recall.  
+- **Atelectasis** and **Edema** achieve high recall but very low precision, indicating a large number of false positives.  
+- Despite good AUROC values, the AP scores reveal that **separating positives from negatives remains difficult**, especially for less frequent labels.  
+
+This confirms that:
+
+- the model learns a meaningful ranking signal (high AUROC)  
+- but the score distributions of positives and negatives still overlap significantly  
+- making reliable threshold-based decisions difficult  
+
+In particular, for Edema:
+
+- high recall (~0.67) comes at the cost of many false positives  
+- resulting in very low precision (~0.16)  
+- and consequently low AP (~0.21)  
+
+---
+
+### Conclusion
+
+Restricting the label space and increasing training time improves recall, but **does not resolve the fundamental precision–recall trade-off**.
+
+Even for relatively "easier" pathologies, the model struggles to produce well-separated probability distributions, which limits the effectiveness of threshold-based classification.
 
 # Project Highlights
 
-This project demonstrates a complete applied machine learning pipeline for medical imaging, with focus on robustness, efficiency, and realistic evaluation:
+This project demonstrates a complete applied machine learning pipeline for medical imaging, with a focus on robustness, efficiency, and realistic evaluation:
 
 - Efficient dataset caching reducing storage from ~45GB to ~1GB, enabling fast local experimentation  
-- Efficient training (few minutes per epoch on ~50k images on a single Colab GPU,
-  depending on configuration)
-- Patient-level dataset splitting to prevent data leakage across train, tune, and test sets
-- Multi-label classification setup reflecting real clinical diagnosis scenarios  
-- Transfer learning using pretrained CNN architectures (ResNet / MobileNet)  
-- Handling of severe class imbalance through configurable sampling and loss weighting  
+- Patient-level dataset splitting to prevent leakage across train, tune, and test sets  
+- Representative subset construction to keep pathology proportions approximately stable under compute constraints  
+- Multi-label classification setup reflecting realistic radiological diagnosis scenarios  
+- Transfer learning using pretrained CNN backbones (ResNet / MobileNet) with optional freezing of early layers
 - Flexible loss design combining BCE and Focal Loss  
-- Support for initializing positive class weights to emphasize rare pathologies  
-- Dynamic update of positive weights based on the model's ability to separate
-  positive and negative samples (gap-based weighting)
-- Per-label threshold optimization to improve sensitivity-specific performance  
-- Error-driven fine-tuning focused on underperforming disease labels  
-- End-to-end pipeline from data preprocessing to evaluation with medical metrics  
+- Optional static and dynamic positive class weighting for imbalance handling  
+- Per-label threshold optimization on the tune set  
+- Error-driven fine-tuning for underperforming labels  
+- Evaluation with AUROC, Average Precision (AP), precision, recall, F1, and per-label confusion statistics  
+- Automatic generation of ROC curves, Precision–Recall curves, probability distribution plots, and sample classification visualizations  
+- Pathology sample grids for qualitative inspection of label quality and visual difficulty  
 
 ------------------------------------------------------------------------
 # Challenges
@@ -284,7 +357,8 @@ NIH_dataset_nn/
 │   ├── functions.py
 │   ├── models.py
 │   ├── nihdataset.py
-│   └── performance_metrics.py
+│   ├──performance_metrics.py
+│   └── load_disease_image_grid.py
 ├── requirements.txt
 ├── requirements_frozen.txt
 └── README.md
@@ -534,8 +608,8 @@ The main experiment setup is defined in `analyze_nih.py`.
 
 ### Threshold behavior
 
-- `THRESHOLD_TUNE_EPOCH`  
-  Epoch at which threshold tuning is performed.
+- `THRESHOLD_TUNE_EPOCHS`  
+  Epochs at which threshold tuning is performed.
 
 - `initial_prob_threshold`  
   Initial threshold used before tuning.
@@ -591,10 +665,7 @@ this repository, two main regimes were tested:
 - **fast learning**: `lr = 1e-4`
 - **slow learning**: `lr = 1e-5`
 For serious experiments, `MAX_IMAGES` should be at least around `30000-50000`
-to guarantee enough samples for learning each pathology. It's important to note that 
-`MAX_IMAGES` refers to the size of the train loader (70% of the total) and not to the total size of 
-the images used 
-for training, tuning and evaluation.
+to guarantee enough samples for learning each pathology. 
 ------------------------------------------------------------------------
 # 6. Loss and Class Imbalance
 
@@ -822,13 +893,15 @@ Metrics are computed in `performance_metrics.py`.
 
 Key metrics:
 
--   AUROC
--   Accuracy
--   Precision
--   Recall
--   F1 Score
--   False Negative Rate
--   False Positive Rate
+Key metrics:
+- AUROC
+- Average Precision (AP)
+- Accuracy
+- Precision
+- Recall
+- F1 Score
+- False Negative Rate
+- False Positive Rate
 
 Core functions:
 
@@ -836,6 +909,7 @@ Core functions:
 -   `give_performance_metrics()`
 -   `compute_fn_fp_rate()`
 -   `compute_weighted_f1()`
+-   `compute_average_precision_per_label()`
 
 ------------------------------------------------------------------------
 
@@ -939,11 +1013,14 @@ Evaluation directory:
 -   ROC curve plots
 -   classification examples
 -   CSV file with disease‑level metrics
+-   Precision–Recall curves 
+-   Probability distribution plots for positive vs negative samples
 
 Functions:
 
 -   `plot_roc_curve()`
--   `plot_images_classification()`
+-   `plot_images_classification()` 
+-   `plot_precision_recall_curves()`
 
 The models can be saved using 
 -   `save_model()`
@@ -952,11 +1029,10 @@ The models can be saved using
 
 The repository also includes a utility to generate image grids for each pathology from the NIH dataset metadata.
 
-The grid selection prefers **pure samples** (images containing only the requested label) and falls back to **mixed samples** when necessary. This makes it easier to visually inspect the typical appearance of each pathology and to assess image and label quality.
+The grid selection prefers **pure samples** (images containing only the requested label) and falls back to **mixed samples** when necessary. 
+This makes it easier to visually inspect the typical appearance of each pathology and to assess image and label quality.
 
-Example output files can be stored in:
-``` id="n8ij4s"
-pathology_samples/
+The images are be stored in the directory pathology_samples/
 
 ------------------------------------------------------------------------
 
@@ -1026,12 +1102,20 @@ training mode, and threshold behavior.
 
 # Potential Improvements
 
-Future extensions could include:
+Future work should focus on addressing the main limitation observed in this project:  
+the insufficient separation between positive and negative samples.
 
--   full experiment configuration files
--   automated hyperparameter tuning
--   model checkpoint saving
--   changes in nn architecture
+A more systematic and automated parameter tuning could also be explored.
+
+Potential directions for improving class separation include:
+
+- improved handling of label noise in the dataset  
+- loss functions designed to enhance class separation   
+- better handling of class imbalance beyond static weighting  
+- improving data consistency (e.g. AP vs PA projection differences)  
+- exploring stronger architectures or higher-resolution inputs  
+- systematic evaluation of partial freezing strategies  
+- improved image preprocessing techniques  
 ------------------------------------------------------------------------
 
 # Key Skills Demonstrated
@@ -1041,7 +1125,7 @@ This project demonstrates:
 -   PyTorch deep learning workflows
 -   transfer learning
 -   multi‑label classification
-  - tuning on loss function
+-   tuning on loss function
 -   dataset engineering
 -   class imbalance handling
 -   model evaluation and metrics
